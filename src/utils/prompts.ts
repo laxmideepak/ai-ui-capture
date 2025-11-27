@@ -74,7 +74,10 @@ Return a single valid JSON object (no markdown formatting):
    - **Status Change:** Complete when the status badge visibly shows the new value.
    - **Assignment:** Complete when the assignee avatar/name matches the target.
    - **Creation:** Complete when the new item appears in the list view.
-   - **Compound Tasks:** For "Create and Assign", both steps must be finished.
+   - **Compound Tasks:** 
+     * For "Create with description": Must create issue AND add description before completing.
+     * For "Create and Assign": Must create issue AND assign before completing.
+     * Parse the task carefully - if it mentions multiple parts (title, description, assign), ALL parts must be done.
 
 ---
 
@@ -84,7 +87,8 @@ Return a single valid JSON object (no markdown formatting):
 - Click "New issue" (or press 'C') -> Type title -> System handles submission.
 
 **Adding Descriptions/Comments:**
-- Open issue -> Click "Add description..." or comment box -> Type -> System handles save.
+- Open issue -> Click "Add description..." button -> Wait for description field to appear -> Type in the description field (NOT the button) -> System handles save.
+- IMPORTANT: After clicking "Add description...", look for a contenteditable div or textarea that appears - that's the field to type into.
 
 **Changing Status (CRITICAL):**
 - Status badges in the *list view* are NOT clickable.

@@ -14,7 +14,11 @@ export class ElementFinder {
 
     // 1. Specialized Field Handlers
     if (/issue title|^title$/i.test(target)) return this.findTitleField();
-    if (/description/i.test(target)) return this.findDescriptionField();
+    // Description field detection - exclude button text "Add description..."
+    if (/description/i.test(target) && !/^add description/i.test(target)) {
+      const descField = await this.findDescriptionField();
+      if (descField) return descField;
+    }
     if (/comment/i.test(target)) return this.findCommentField();
     if (/status badge|status of|change status/i.test(target)) return this.findStatusWithIssueNavigation(target);
     if (/assignee|assign|unassigned|to yourself/i.test(target)) return this.findAssigneeField();
@@ -182,48 +186,76 @@ export class ElementFinder {
     const selectors = [
       'div[contenteditable="true"][placeholder*="description" i]',
       'div[contenteditable="true"][data-placeholder*="Add a description" i]',
+      'div[contenteditable="true"]:has-text("")', // Empty contenteditable (description field after clicking)
       'textarea[placeholder*="description" i]',
     ];
 
-    // 1. Direct search
+    // 1. Direct search for existing description field (already opened)
     for (const selector of selectors) {
       const locator = this.page.locator(selector).first();
-      if (await this.isVisible(locator)) return locator;
+      if (await this.isVisible(locator)) {
+        // Verify it's actually editable, not a button
+        const tag = await locator.evaluate((el) => el.tagName.toLowerCase());
+        const role = await locator.getAttribute('role').catch(() => null);
+        if (tag === 'div' && role !== 'button') {
+          console.log(`Found description field via selector: ${selector}`);
+          return locator;
+        }
+      }
     }
 
-    // 2. Click "Add description" button
+    // 2. Look for contenteditable divs that might be description fields
+    const contentEditables = await this.page.locator('div[contenteditable="true"]').all();
+    for (const editable of contentEditables) {
+      const placeholder = await editable.getAttribute('placeholder').catch(() => '');
+      const dataPlaceholder = await editable.getAttribute('data-placeholder').catch(() => '');
+      const role = await editable.getAttribute('role').catch(() => null);
+      
+      if (role !== 'button' && (placeholder.toLowerCase().includes('description') || 
+          dataPlaceholder.toLowerCase().includes('description') ||
+          (placeholder === '' && dataPlaceholder === ''))) {
+        const text = await editable.textContent().catch(() => '');
+        // If it's empty or has minimal text, it's likely the description field
+        if (text.trim().length < 50) {
+          console.log('Found description field via contenteditable search');
+          return editable;
+        }
+      }
+    }
+
+    // 3. If no field found, try clicking "Add description" button
     const addButton = this.page.getByText('Add description', { exact: false }).first();
     if (await this.isVisible(addButton)) {
-      console.log('Clicking "Add description" placeholder');
+      console.log('Clicking "Add description" button to reveal field');
       await addButton.click();
-      await this.manager.waitForStable(800);
+      await this.manager.waitForStable(1000); // Give it time to appear
+      
+      // Retry search after button click
       for (const selector of selectors) {
         const locator = this.page.locator(selector).first();
-        if (await this.isVisible(locator)) return locator;
+        if (await this.isVisible(locator)) {
+          const tag = await locator.evaluate((el) => el.tagName.toLowerCase());
+          if (tag === 'div' || tag === 'textarea') {
+            console.log(`Found description field after button click: ${selector}`);
+            return locator;
+          }
+        }
+      }
+      
+      // Also check contenteditables again after click
+      const newEditables = await this.page.locator('div[contenteditable="true"]').all();
+      for (const editable of newEditables) {
+        const role = await editable.getAttribute('role').catch(() => null);
+        if (role !== 'button') {
+          const text = await editable.textContent().catch(() => '');
+          if (text.trim().length < 50) {
+            console.log('Found description field after button click via contenteditable');
+            return editable;
+          }
+        }
       }
     }
 
-    // 3. Contextual search via last issue
-    const lastIssueTitle = this.manager.getLastIssueTitle();
-    if (lastIssueTitle) {
-      console.log(`Context: Opening last issue "${lastIssueTitle}"`);
-      if (await this.openIssueViaSearch(lastIssueTitle)) {
-        this.manager.setLastIssueTitle(null); // Reset context
-        await this.manager.waitForStable(1000);
-        
-        // Retry button click in new context
-        const button = this.page.getByText('Add description', { exact: false }).first();
-        if (await this.isVisible(button)) {
-          await button.click();
-          await this.manager.waitForStable(800);
-        }
-        
-        for (const selector of selectors) {
-          const locator = this.page.locator(selector).first();
-          if (await this.isVisible(locator)) return locator;
-        }
-      }
-    }
     return null;
   }
 

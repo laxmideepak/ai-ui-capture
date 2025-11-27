@@ -209,14 +209,30 @@ export class NavigationAgent {
   private refineDecision(decision: any, history: ActionEntry[], task: string): void {
     const taskLower = task.toLowerCase();
     
-    // Rule 1: "Create and Assign" must not finish after just creation
+    // Rule 1: "Create with description" must not finish after just title
+    const hasDescriptionRequest = taskLower.includes('description') && taskLower.includes('create');
+    const hasTitle = history.some(h => h.action.type === 'type' && /title/i.test(h.action.target || ''));
+    const hasDescription = history.some(h => h.action.type === 'type' && /description/i.test(h.action.target || ''));
+
+    if (decision.nextAction.type === 'complete' && hasDescriptionRequest && hasTitle && !hasDescription) {
+      console.log('Refinement: Blocking premature completion (Description missing)');
+      decision.nextAction = {
+        type: 'click',
+        target: 'Add description',
+        reasoning: 'Task requires description to be added after creating issue.'
+      };
+      decision.progressAssessment = 60;
+      return;
+    }
+
+    // Rule 2: "Create and Assign" must not finish after just creation
     const isMultiStep = (taskLower.includes('and') || taskLower.includes('then')) &&
                         taskLower.includes('create') && 
                         taskLower.includes('assign');
 
     if (decision.nextAction.type === 'complete' && isMultiStep) {
-      const hasCreated = history.some(h => h.action.type === 'type' && /title|issue/i.test(h.action.target));
-      const hasAssigned = history.some(h => /assign/i.test(h.action.target));
+      const hasCreated = history.some(h => h.action.type === 'type' && /title|issue/i.test(h.action.target || ''));
+      const hasAssigned = history.some(h => /assign/i.test(h.action.target || ''));
 
       if (hasCreated && !hasAssigned) {
         console.log('Refinement: Blocking premature completion (Assignment missing)');
@@ -226,6 +242,7 @@ export class NavigationAgent {
           reasoning: 'Task requires assignment after creation.'
         };
         decision.progressAssessment = 70;
+        return;
       }
     }
 
