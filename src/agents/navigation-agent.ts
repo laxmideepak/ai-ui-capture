@@ -156,9 +156,27 @@ IMPORTANT GUIDANCE:
         console.log(`Reasoning: ${decision.nextAction.reasoning}`);
         console.log(`Progress: ${decision.progressAssessment}% | Key State: ${decision.isKeyState}`);
 
+        // Prevent premature completion for multi-step tasks
+        const taskLower = task.toLowerCase();
+        const hasMultipleActions = (taskLower.includes('and') || taskLower.includes('then')) && 
+          (taskLower.includes('create') || taskLower.includes('assign') || taskLower.includes('update'));
+        
+        if (decision.nextAction.type === 'complete' && hasMultipleActions && history.length < 4) {
+          const createdIssue = history.some(h => h.action.type === 'type' && /title|issue/i.test(h.action.target || ''));
+          const assignedIssue = history.some(h => h.action.target?.toLowerCase().includes('assign') || h.action.target?.toLowerCase().includes('assignee'));
+          
+          if (taskLower.includes('create') && taskLower.includes('assign') && createdIssue && !assignedIssue) {
+            console.log('⚠️ Task requires both creation AND assignment - preventing premature completion');
+            decision.nextAction.type = 'click';
+            decision.nextAction.target = 'Assignee field';
+            decision.nextAction.reasoning = 'Need to complete assignment step before marking task complete';
+            decision.progressAssessment = Math.min(decision.progressAssessment, 70);
+          }
+        }
+
         if (decision.nextAction.type === 'click' && decision.progressAssessment >= 80 && history.length >= 2) {
-          const isStatusChangeTask = task.toLowerCase().includes('status') || (task.toLowerCase().includes('change') && task.toLowerCase().includes('progress'));
-          const isAssignmentTask = task.toLowerCase().includes('assign');
+          const isStatusChangeTask = taskLower.includes('status') || (taskLower.includes('change') && taskLower.includes('progress'));
+          const isAssignmentTask = taskLower.includes('assign');
           
           const recentActions = history.slice(-2);
           const lastTwoSame = recentActions.every(
