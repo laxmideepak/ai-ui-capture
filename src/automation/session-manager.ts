@@ -1,7 +1,7 @@
-import { BrowserContext, Page } from 'playwright';
-import { config } from '../utils/config';
 import fs from 'fs';
 import path from 'path';
+import { BrowserContext, Page } from 'playwright';
+import { config } from '../utils/config';
 
 export class SessionManager {
   async saveSession(context: BrowserContext): Promise<void> {
@@ -14,10 +14,10 @@ export class SessionManager {
       }
 
       await context.storageState({ path: authPath });
-      console.log(`Session saved: ${authPath}`);
+      console.log(`Session state saved to: ${authPath}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn('Failed to save session:', message);
+      console.warn('Warning: Failed to save session state:', message);
     }
   }
 
@@ -26,34 +26,28 @@ export class SessionManager {
       const url = page.url();
 
       if (this.isOnLoginPage(url)) {
-        console.log('Login check: On login page');
+        console.log('Auth Status: Login page detected');
         return false;
       }
 
-      const loginButtons = await page.locator('text=/continue with|sign in|log in/i').count();
-      if (loginButtons > 0) {
-        console.log('Login check: Login buttons found');
+      // Check for generic "Sign In" buttons
+      const loginButtonCount = await page.locator('text=/continue with|sign in|log in/i').count();
+      if (loginButtonCount > 0) {
+        console.log('Auth Status: Login buttons detected');
         return false;
       }
 
-      if (url.includes('linear.app')) {
-        return this.checkLinearAuth(page);
-      }
+      // Platform-specific checks
+      if (url.includes('linear.app')) return await this.checkLinearAuth(page);
+      if (url.includes('notion.so') || url.includes('notion.com')) return await this.checkNotionAuth(page);
+      if (url.includes('asana.com')) return await this.checkAsanaAuth(page);
 
-      if (url.includes('notion.so') || url.includes('notion.com')) {
-        return this.checkNotionAuth(page);
-      }
+      // Default assumption: If not on login page, we are likely logged in
+      console.log('Auth Status: Generic logged-in check passed');
+      return true;
 
-      if (url.includes('asana.com')) {
-        return this.checkAsanaAuth(page);
-      }
-
-      const result = !this.isOnLoginPage(url);
-      console.log(`Login check: Generic fallback = ${result}`);
-      return result;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error('Login check failed:', message);
+      console.error('Auth Check Failed:', error);
       return false;
     }
   }
@@ -63,57 +57,32 @@ export class SessionManager {
   }
 
   private async checkLinearAuth(page: Page): Promise<boolean> {
-    const indicators = await page
-      .locator('[data-testid*="sidebar"], [aria-label*="Issues" i], a[href*="/issue/"]')
-      .count();
-
-    if (indicators > 0) {
-      console.log('Login check: Linear workspace detected');
-      return true;
-    }
-
-    console.log('Login check: No Linear workspace indicators found');
-    return false;
+    const selector = '[data-testid*="sidebar"], [aria-label*="Issues" i], a[href*="/issue/"]';
+    const hasWorkspace = await page.locator(selector).count() > 0;
+    
+    console.log(hasWorkspace ? 'Auth: Linear workspace active' : 'Auth: No Linear workspace found');
+    return hasWorkspace;
   }
 
   private async checkNotionAuth(page: Page): Promise<boolean> {
-    const indicators = await page
-      .locator('[data-testid*="sidebar"], [data-testid*="workspace"], [aria-label*="workspace" i], [class*="sidebar"]')
-      .count();
-
-    if (indicators > 0) {
-      console.log('Login check: Notion workspace detected');
+    const sidebarCount = await page.locator('[data-testid*="sidebar"], [data-testid*="workspace"], [class*="sidebar"]').count();
+    if (sidebarCount > 0) {
+      console.log('Auth: Notion workspace active');
       return true;
     }
-
-    const contentArea = await page.locator('[contenteditable="true"], [class*="notion-page"]').count();
-    if (contentArea > 0) {
-      console.log('Login check: Notion content area detected');
-      return true;
-    }
-
-    console.log('Login check: No Notion workspace indicators found');
-    return false;
+    
+    const contentCount = await page.locator('[contenteditable="true"], [class*="notion-page"]').count();
+    return contentCount > 0;
   }
 
   private async checkAsanaAuth(page: Page): Promise<boolean> {
-    const indicators = await page
-      .locator('[data-testid*="sidebar"], [aria-label*="workspace" i], [class*="Sidebar"], [class*="Workspace"]')
-      .count();
-
-    if (indicators > 0) {
-      console.log('Login check: Asana workspace detected');
+    const sidebarCount = await page.locator('[data-testid*="sidebar"], [aria-label*="workspace" i], [class*="Sidebar"]').count();
+    if (sidebarCount > 0) {
+      console.log('Auth: Asana workspace active');
       return true;
     }
-
-    const taskList = await page.locator('[class*="Task"], [class*="Project"]').count();
-    if (taskList > 0) {
-      console.log('Login check: Asana task/project list detected');
-      return true;
-    }
-
-    console.log('Login check: No Asana workspace indicators found');
-    return false;
+    
+    const taskListCount = await page.locator('[class*="Task"], [class*="Project"]').count();
+    return taskListCount > 0;
   }
 }
-

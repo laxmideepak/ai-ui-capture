@@ -1,13 +1,6 @@
 import { Locator, Page } from 'playwright';
-import type { ElementFinder } from './element-finder';
-import type { PlaywrightManager } from './playwright-manager';
-
-interface ActionPayload {
-  type: string;
-  target: string;
-  value?: string;
-  reasoning?: string;
-}
+import { ActionPayload, PlaywrightManager } from './playwright-manager';
+import { ElementFinder } from './element-finder';
 
 export class ActionExecutor {
   constructor(
@@ -20,32 +13,31 @@ export class ActionExecutor {
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         if (attempt > 0) {
-          console.log(`Retry ${attempt}/${retries}`);
+          console.log(`Retry ${attempt}/${retries} for ${action.type}...`);
           await this.page.waitForTimeout(1000);
         }
 
-        console.log(`Action: ${action.type} -> "${action.target}"`);
+        console.log(`Executing: ${action.type} -> "${action.target}"`);
 
+        // 1. Non-element actions
         if (action.type === 'wait') {
           await this.page.waitForTimeout(2000);
           return;
         }
-
         if (action.type === 'complete') {
-          console.log('Task complete');
+          console.log('Task marked as complete');
           return;
         }
-
         if (action.type === 'navigate') {
           await this.manager.navigate(action.value || action.target);
           return;
         }
-
         if (action.type === 'scroll') {
           await this.scroll(action.target);
           return;
         }
 
+        // 2. Element resolution
         let element = await this.finder.findElement(action.target);
         if (!element) {
           element = await this.finder.fallbackFind(action.target);
@@ -53,11 +45,13 @@ export class ActionExecutor {
 
         if (!element) {
           if (await this.tryShortcut(action)) return;
+          
           console.warn(`Element not found: "${action.target}"`);
-          if (attempt === retries) return;
+          if (attempt === retries) return; // Fail gracefully on last attempt
           continue;
         }
 
+        // 3. Interaction
         if (action.type === 'click') {
           await this.click(element, action.target);
         } else if (action.type === 'type') {
@@ -66,34 +60,33 @@ export class ActionExecutor {
 
         await this.manager.waitForStable();
         return;
+
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown';
-        console.error(`Attempt ${attempt + 1} failed: ${message}`);
+        const msg = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`Attempt ${attempt + 1} failed: ${msg}`);
         if (attempt === retries) return;
       }
     }
   }
 
-  private async click(element: Locator, target: string): Promise<void> {
+  private async click(element: Locator, targetName: string): Promise<void> {
     await element.scrollIntoViewIfNeeded();
     await this.page.waitForTimeout(300);
 
     try {
       await element.click({ timeout: 5000 });
     } catch {
+      console.warn('Standard click failed, attempting force click');
       await element.click({ force: true });
     }
 
-    console.log(`Clicked: "${target}"`);
-
+    console.log(`Clicked: "${targetName}"`);
     await this.page.waitForTimeout(500);
-    const menuOpen = await this.page
-      .locator('[role="menu"], [role="listbox"]')
-      .isVisible()
-      .catch(() => false);
 
+    // Check for auto-opening menus
+    const menuOpen = await this.page.locator('[role="menu"], [role="listbox"]').isVisible().catch(() => false);
     if (menuOpen) {
-      await this.autoSelectMenuOption(target);
+      await this.autoSelectMenuOption(targetName);
     }
   }
 
@@ -101,42 +94,46 @@ export class ActionExecutor {
     await element.scrollIntoViewIfNeeded();
     await this.page.waitForTimeout(300);
 
-    let [tag, contentEditable, role, isNotion] = await element.evaluate((el) => [
-      el.tagName.toLowerCase(),
-      el.getAttribute('contenteditable'),
-      el.getAttribute('role'),
-      el.closest('[class*="notion"]') !== null || el.getAttribute('data-content-root') !== null,
-    ]);
+    // Analyze element characteristics
+    let { tag, contentEditable, role, isNotion } = await element.evaluate((el) => ({
+      tag: el.tagName.toLowerCase(),
+      contentEditable: el.getAttribute('contenteditable'),
+      role: el.getAttribute('role'),
+      isNotion: el.closest('[class*="notion"]') !== null || el.getAttribute('data-content-root') !== null,
+    }));
 
+    // If we found a label, re-resolve to the input
     if (tag === 'label') {
-      console.log('Found label element, resolving to associated input');
+      console.log('Resolving label to input...');
       const resolved = await this.finder.resolveLabelToInput(element);
-      if (resolved) {
-        element = resolved;
-        [tag, contentEditable, role, isNotion] = await element.evaluate((el) => [
-          el.tagName.toLowerCase(),
-          el.getAttribute('contenteditable'),
-          el.getAttribute('role'),
-          el.closest('[class*="notion"]') !== null || el.getAttribute('data-content-root') !== null,
-        ]);
-      } else {
-        throw new Error('Found label but could not resolve to input field');
-      }
+      if (!resolved) throw new Error('Found label but could not resolve to input field');
+      
+      element = resolved;
+      // Re-evaluate props for the actual input
+      const newProps = await element.evaluate((el) => ({
+        tag: el.tagName.toLowerCase(),
+        contentEditable: el.getAttribute('contenteditable'),
+        role: el.getAttribute('role'),
+        isNotion: el.closest('[class*="notion"]') !== null || el.getAttribute('data-content-root') !== null,
+      }));
+      tag = newProps.tag;
+      contentEditable = newProps.contentEditable;
+      role = newProps.role;
+      isNotion = newProps.isNotion;
     }
 
-    const isEditable =
-      tag === 'input' ||
-      tag === 'textarea' ||
-      contentEditable === 'true' ||
-      contentEditable === '' ||
+    const isEditable = 
+      tag === 'input' || 
+      tag === 'textarea' || 
+      contentEditable === 'true' || 
+      contentEditable === '' || 
       role === 'textbox';
 
     if (!isEditable) {
-      throw new Error(`Not editable: ${tag}, role=${role}, contenteditable=${contentEditable}`);
+      throw new Error(`Target element is not editable (tag=${tag}, role=${role})`);
     }
 
-    console.log(`Typing into: ${tag}${isNotion ? ' (Notion)' : ''}`);
-
+    console.log(`Typing into ${tag} ${isNotion ? '(Notion)' : ''}`);
     await element.click({ force: true });
     await this.page.waitForTimeout(400);
 
@@ -148,16 +145,18 @@ export class ActionExecutor {
       }
     }
 
-    await this.handlePostTypeActions(action.target, action.value);
+    await this.handlePostTypeActions(action.target);
   }
 
   private async typeInContentEditable(value: string): Promise<void> {
+    // Clear via keyboard to handle rich text editors safe
     await this.page.keyboard.press('Meta+A');
     await this.page.waitForTimeout(100);
     await this.page.keyboard.press('Backspace');
     await this.page.waitForTimeout(200);
+    
     await this.page.keyboard.type(value, { delay: 50 });
-    console.log(`Typed (keyboard): "${value}"`);
+    console.log(`Typed (simulated): "${value}"`);
     await this.page.waitForTimeout(500);
   }
 
@@ -165,58 +164,52 @@ export class ActionExecutor {
     try {
       await element.fill('');
     } catch {
+      // Fallback if fill fails (e.g. some React inputs)
       await this.page.keyboard.press('Meta+A');
       await this.page.keyboard.press('Backspace');
     }
-
+    
     await element.fill(value);
     console.log(`Typed: "${value}"`);
 
-    const current = await element.inputValue().catch(() => element.textContent());
-    if (!current?.includes(value)) {
-      console.warn('Type verification failed, but continuing');
+    // Loose verification
+    const currentVal = await element.inputValue().catch(() => element.textContent());
+    if (!currentVal?.includes(value)) {
+      console.warn('Warning: Input verification failed (value mismatch)');
     }
   }
 
-  private async handlePostTypeActions(target: string, value?: string): Promise<void> {
+  private async handlePostTypeActions(target: string): Promise<void> {
     const targetLower = target.toLowerCase();
-    const currentUrl = this.page.url();
+    const isUrlSettings = this.page.url().includes('/settings/');
 
     if (/issue title|^title$/.test(targetLower)) {
-      this.manager.setLastIssueTitle(value || null);
-      console.log('Auto-submit: Cmd+Enter for issue');
+      console.log('Action: Auto-submit (Cmd+Enter) for issue');
       await this.page.keyboard.press('Meta+Enter');
       await this.page.waitForTimeout(2000);
-    }
-
-    if (/description/.test(targetLower)) {
-      console.log('Auto-save: Cmd+Enter for description');
+    } else if (/description/.test(targetLower)) {
+      console.log('Action: Auto-save (Cmd+Enter) for description');
       await this.page.keyboard.press('Meta+Enter');
       await this.manager.waitForStable(1500);
-    }
-
-    if (/comment/.test(targetLower)) {
-      console.log('Auto-submit: Cmd+Enter for comment');
+    } else if (/comment/.test(targetLower)) {
+      console.log('Action: Auto-submit (Cmd+Enter) for comment');
       await this.page.keyboard.press('Meta+Enter');
       await this.manager.waitForStable(1500);
-    }
-
-    if (/full name|name|username|email|profile/i.test(targetLower) && currentUrl.includes('/settings/')) {
+    } else if (/full name|name|username|email|profile/i.test(targetLower) && isUrlSettings) {
       await this.handleSettingsSave();
     }
   }
 
   private async handleSettingsSave(): Promise<void> {
-    console.log('Settings field detected - looking for save button');
+    console.log('Settings detected - searching for Save action');
     await this.page.waitForTimeout(500);
-
+    
     const saveButton = await this.finder.findSaveButton();
     if (saveButton) {
-      console.log('Clicking save button');
       await saveButton.click();
       await this.manager.waitForStable(1000);
     } else {
-      console.log('No save button found - trying Tab+Enter to trigger save');
+      console.log('No save button found - attempting Tab+Enter');
       await this.page.keyboard.press('Tab');
       await this.page.waitForTimeout(300);
       await this.page.keyboard.press('Enter');
@@ -226,47 +219,39 @@ export class ActionExecutor {
 
   private async scroll(target: string): Promise<void> {
     const lower = target.toLowerCase();
-
-    if (lower.includes('down')) {
-      await this.page.mouse.wheel(0, 800);
-    } else if (lower.includes('up')) {
-      await this.page.mouse.wheel(0, -800);
-    } else if (lower.includes('bottom')) {
-      await this.page.keyboard.press('End');
-    } else if (lower.includes('top')) {
-      await this.page.keyboard.press('Home');
-    } else {
-      await this.page.mouse.wheel(0, 600);
-    }
+    
+    if (lower.includes('down')) await this.page.mouse.wheel(0, 800);
+    else if (lower.includes('up')) await this.page.mouse.wheel(0, -800);
+    else if (lower.includes('bottom')) await this.page.keyboard.press('End');
+    else if (lower.includes('top')) await this.page.keyboard.press('Home');
+    else await this.page.mouse.wheel(0, 600); // Default
 
     await this.page.waitForTimeout(500);
-    console.log('Scrolled');
+    console.log('Scroll action completed');
   }
 
   private async tryShortcut(action: ActionPayload): Promise<boolean> {
     const target = action.target.toLowerCase();
 
+    // Mapping intent to shortcuts
     if (/create|new|plus|\+/.test(target)) {
-      console.log('Trying "C" key (create)');
+      console.log('Shortcut: Pressing "C" (Create)');
       await this.page.keyboard.press('KeyC');
       await this.page.waitForTimeout(1500);
-
+      
       const modal = this.page.locator('[role="dialog"], [placeholder*="Title" i]');
-      if (await this.finder.isVisible(modal)) {
-        console.log('Create modal opened');
-        return true;
-      }
+      if (await this.finder.isVisible(modal)) return true;
     }
 
     if (/submit|send|post|save/.test(target)) {
-      console.log('Trying Cmd+Enter (submit)');
+      console.log('Shortcut: Pressing Cmd+Enter (Submit)');
       await this.page.keyboard.press('Meta+Enter');
       await this.page.waitForTimeout(1500);
       return true;
     }
 
     if (/delete|remove/.test(target)) {
-      console.log('Trying Cmd+Backspace (delete)');
+      console.log('Shortcut: Cmd+Backspace (Delete)');
       await this.page.keyboard.press('Meta+Backspace');
       await this.page.waitForTimeout(1000);
       await this.page.keyboard.press('Enter');
@@ -284,18 +269,16 @@ export class ActionExecutor {
   private async autoSelectMenuOption(target: string): Promise<void> {
     const lower = target.toLowerCase();
     const match = lower.match(/(?:to|select|set)\s+(done|high|urgent|in progress|todo|low|medium|backlog)/i);
-
+    
     if (match) {
       const option = match[1];
-      console.log(`Auto-selecting: "${option}"`);
+      console.log(`Menu open: Auto-selecting "${option}"`);
       await this.page.waitForTimeout(800);
-
+      
       const optionLocator = this.page.getByText(option, { exact: false }).first();
       if (await this.finder.isVisible(optionLocator)) {
         await optionLocator.click({ timeout: 3000 });
-        console.log(`Selected: "${option}"`);
       }
     }
   }
 }
-

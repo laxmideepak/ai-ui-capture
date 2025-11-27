@@ -1,22 +1,31 @@
+import fs from 'fs/promises';
 import OpenAI from 'openai';
 import { config } from './config';
-import fs from 'fs/promises';
 
-interface ActionDecision {
+/**
+ * Represents a single action decision from the Vision API.
+ */
+export interface ActionDecision {
   type: 'click' | 'type' | 'wait' | 'navigate' | 'complete' | 'scroll';
   target: string;
   value?: string;
   reasoning: string;
 }
 
-interface GPTResponse {
+/**
+ * Complete response structure from the Vision API after analyzing a screenshot.
+ */
+export interface GPTResponse {
   stateDescription: string;
   nextAction: ActionDecision;
   isKeyState: boolean;
   progressAssessment: number;
 }
 
-interface TaskPlan {
+/**
+ * Task planning response structure from the Planning API.
+ */
+export interface TaskPlan {
   taskName: string;
   estimatedSteps: number;
   keyMilestones: string[];
@@ -31,13 +40,13 @@ export class GPT4Client {
   constructor() {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      throw new Error('OPENAI_API_KEY environment variable is required');
+      throw new Error('GPT4Client: OPENAI_API_KEY environment variable is required');
     }
     this.client = new OpenAI({ apiKey });
   }
 
   async analyzeScreenshot(imagePath: string, prompt: string): Promise<GPTResponse> {
-    const imageBase64 = await this.encodeImage(imagePath);
+    const base64Image = await this.encodeImage(imagePath);
     
     const response = await this.client.chat.completions.create({
       model: config.openai.model,
@@ -48,7 +57,7 @@ export class GPT4Client {
             { type: 'text', text: prompt },
             {
               type: 'image_url',
-              image_url: { url: `data:image/png;base64,${imageBase64}` },
+              image_url: { url: `data:image/png;base64,${base64Image}` },
             },
           ],
         },
@@ -60,52 +69,17 @@ export class GPT4Client {
 
     const content = response.choices[0].message.content;
     if (!content?.trim()) {
-      throw new Error('Empty response from GPT-4V');
+      throw new Error('GPT4Client: Empty response received from Vision API');
     }
 
-    let parsed: GPTResponse;
-    try {
-      parsed = JSON.parse(content) as GPTResponse;
-    } catch (error) {
-      console.error('Failed to parse GPT response as JSON');
-      console.error('Raw response:', content);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid JSON response from GPT: ${errorMessage}`);
-    }
-
-    if (!parsed.nextAction) {
-      console.error('Missing nextAction in GPT response');
-      console.error('Parsed response:', JSON.stringify(parsed, null, 2));
-      throw new Error('Invalid GPT response: missing nextAction');
-    }
-
-    if (!parsed.nextAction.type || !parsed.nextAction.target) {
-      console.error('Missing required fields in nextAction');
-      console.error('Parsed response:', JSON.stringify(parsed, null, 2));
-      throw new Error('Invalid GPT response: missing type or target in nextAction');
-    }
-
-    if (typeof parsed.progressAssessment !== 'number' || parsed.progressAssessment < 0 || parsed.progressAssessment > 100) {
-      console.warn('Invalid progressAssessment, defaulting to 0');
-      parsed.progressAssessment = 0;
-    }
-
-    if (typeof parsed.isKeyState !== 'boolean') {
-      parsed.isKeyState = false;
-    }
-
-    return parsed;
+    const parsed = this.safeJsonParse<GPTResponse>(content);
+    return this.validateResponse(parsed);
   }
 
   async planTask(prompt: string): Promise<TaskPlan> {
     const response = await this.client.chat.completions.create({
       model: config.openai.model,
-      messages: [
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
+      messages: [{ role: 'user', content: prompt }],
       max_tokens: 500,
       temperature: 0.3,
       response_format: { type: 'json_object' },
@@ -113,34 +87,84 @@ export class GPT4Client {
 
     const content = response.choices[0].message.content;
     if (!content?.trim()) {
-      throw new Error('Empty planning response from GPT');
+      throw new Error('GPT4Client: Empty planning response received');
     }
 
-    let parsed: TaskPlan;
-    try {
-      parsed = JSON.parse(content) as TaskPlan;
-    } catch (error) {
-      console.error('Failed to parse planning response as JSON');
-      console.error('Raw response:', content);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw new Error(`Invalid JSON planning response: ${errorMessage}`);
-    }
-
-    if (!parsed.estimatedSteps || parsed.estimatedSteps < 1) {
-      parsed.estimatedSteps = 5;
-    }
-    if (!parsed.complexity) {
-      parsed.complexity = 'medium';
-    }
-    if (!parsed.keyMilestones) {
-      parsed.keyMilestones = [];
-    }
-
-    return parsed;
+    const parsed = this.safeJsonParse<TaskPlan>(content);
+    return this.validateTaskPlan(parsed);
   }
+
+  // --- Helpers ---
 
   private async encodeImage(imagePath: string): Promise<string> {
     const buffer = await fs.readFile(imagePath);
     return buffer.toString('base64');
+  }
+
+  private safeJsonParse<T>(content: string): T {
+    try {
+      return JSON.parse(content) as T;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('GPT4Client: JSON Parse Error');
+      console.error('Raw Content:', content);
+      throw new Error(`Invalid JSON response from GPT: ${msg}`);
+    }
+  }
+
+  /**
+   * Validates and sanitizes the Vision API response.
+   * Ensures essential fields exist and numbers are within range.
+   */
+  private validateResponse(data: Partial<GPTResponse>): GPTResponse {
+    if (!data.nextAction) {
+      this.logInvalidResponse(data, 'missing nextAction');
+      throw new Error('Invalid GPT response: missing nextAction');
+    }
+
+    const { type, target } = data.nextAction;
+    if (!type || !target) {
+      this.logInvalidResponse(data, 'missing type or target in nextAction');
+      throw new Error('Invalid GPT response: missing type or target in nextAction');
+    }
+
+    // Sanitize numeric fields
+    let progress = data.progressAssessment;
+    if (typeof progress !== 'number' || progress < 0 || progress > 100) {
+      console.warn('GPT4Client: Invalid progressAssessment, defaulting to 0');
+      progress = 0;
+    }
+
+    return {
+      stateDescription: data.stateDescription || 'No description provided',
+      nextAction: {
+        type,
+        target,
+        value: data.nextAction.value,
+        reasoning: data.nextAction.reasoning || 'No reasoning provided',
+      },
+      isKeyState: typeof data.isKeyState === 'boolean' ? data.isKeyState : false,
+      progressAssessment: progress,
+    };
+  }
+
+  /**
+   * Validates and sanitizes the Planning API response.
+   * Applies defaults for missing optional fields.
+   */
+  private validateTaskPlan(data: Partial<TaskPlan>): TaskPlan {
+    return {
+      taskName: data.taskName || 'unnamed_task',
+      estimatedSteps: (data.estimatedSteps && data.estimatedSteps > 0) ? data.estimatedSteps : 5,
+      keyMilestones: Array.isArray(data.keyMilestones) ? data.keyMilestones : [],
+      startingUrl: data.startingUrl || '',
+      complexity: data.complexity || 'medium',
+      notes: data.notes,
+    };
+  }
+
+  private logInvalidResponse(data: unknown, reason: string): void {
+    console.error(`GPT4Client: Validation failed (${reason})`);
+    console.error('Parsed Data:', JSON.stringify(data, null, 2));
   }
 }

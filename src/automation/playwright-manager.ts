@@ -1,13 +1,13 @@
-import { Browser, Page, chromium, BrowserContext } from 'playwright';
-import { config } from '../utils/config';
 import fs from 'fs';
 import path from 'path';
-import { ElementFinder } from './element-finder';
+import { Browser, BrowserContext, Page, chromium } from 'playwright';
+import { config } from '../utils/config';
 import { ActionExecutor } from './action-executor';
-import { SessionManager } from './session-manager';
 import { DOMExtractor } from './dom-extractor';
+import { ElementFinder } from './element-finder';
+import { SessionManager } from './session-manager';
 
-interface ActionPayload {
+export interface ActionPayload {
   type: string;
   target: string;
   value?: string;
@@ -18,20 +18,23 @@ export class PlaywrightManager {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
-  private lastIssueTitle: string | null = null;
-  private isClosing = false;
-
+  
+  // Helpers
   private elementFinder!: ElementFinder;
   private actionExecutor!: ActionExecutor;
   private sessionManager!: SessionManager;
   private domExtractor!: DOMExtractor;
+
+  // State
+  private lastIssueTitle: string | null = null;
+  private isClosing = false;
 
   async initialize(): Promise<Page> {
     const authPath = path.resolve(process.cwd(), config.paths.auth);
     const hasAuth = fs.existsSync(authPath) && fs.readFileSync(authPath, 'utf-8').trim().length > 0;
 
     if (hasAuth) {
-      console.log('Loading saved session...');
+      console.log('Session: Loading saved state...');
     }
 
     this.browser = await chromium.launch({
@@ -47,35 +50,10 @@ export class PlaywrightManager {
     this.page = await this.context.newPage();
     this.page.setDefaultTimeout(config.browser.timeout);
 
-    this.setupEventHandlers();
-    this.initializeHelpers();
+    this.setupEventHandlers(this.page);
+    this.initializeHelpers(this.page);
 
     return this.page;
-  }
-
-  private setupEventHandlers(): void {
-    if (!this.page) return;
-
-    this.page.on('close', () => {
-      if (!this.isClosing) {
-        console.warn('Page closed unexpectedly');
-      }
-    });
-
-    this.page.on('crash', () => console.error('Page crashed'));
-
-    this.page.on('framenavigated', (frame) => {
-      if (frame === this.page?.mainFrame()) {
-        console.log(`Navigation: ${frame.url()}`);
-      }
-    });
-  }
-
-  private initializeHelpers(): void {
-    this.elementFinder = new ElementFinder(this.page!, this);
-    this.actionExecutor = new ActionExecutor(this.page!, this.elementFinder, this);
-    this.sessionManager = new SessionManager();
-    this.domExtractor = new DOMExtractor();
   }
 
   getCurrentUrl(): string {
@@ -84,23 +62,19 @@ export class PlaywrightManager {
 
   async navigate(url: string): Promise<void> {
     this.ensurePage();
+    
     await this.page!.goto(url, { waitUntil: 'domcontentloaded' });
     await this.waitForStable();
 
-    const hasAuthError = await this.page!
-      .locator('text=/authentication error|don\'t have access|workspace admin/i')
-      .isVisible()
-      .catch(() => false);
+    // Check for common SaaS permission blocks immediately after navigation
+    const authErrorLocator = this.page!.locator('text=/authentication error|don\'t have access|workspace admin/i');
+    const isBlocked = await authErrorLocator.isVisible().catch(() => false);
 
-    if (hasAuthError) {
-      const errorText = await this.page!
-        .locator('text=/authentication error|don\'t have access/i')
-        .first()
-        .textContent()
-        .catch(() => '');
-      console.error(`Authentication error: ${errorText}`);
-      console.error('You don\'t have access to this workspace. Please use a workspace you have access to.');
-      throw new Error(`Authentication error: ${errorText}`);
+    if (isBlocked) {
+      const errorText = await authErrorLocator.first().textContent().catch(() => 'Unknown access error');
+      const msg = `Authentication Error: ${errorText}`;
+      console.error(msg);
+      throw new Error(msg);
     }
   }
 
@@ -109,37 +83,9 @@ export class PlaywrightManager {
     return this.sessionManager.isLoggedIn(this.page!);
   }
 
-  async saveSession(): Promise<void> {
-    if (!this.context) return;
-    await this.sessionManager.saveSession(this.context);
-  }
-
-  async close(): Promise<void> {
-    this.isClosing = true;
-    try {
-      await this.saveSession();
-      await this.page?.close();
-      await this.context?.close();
-      await this.browser?.close();
-      console.log('Browser closed');
-    } catch {
-      // Suppress errors during cleanup
-    }
-  }
-
-  async screenshot(filepath: string): Promise<void> {
+  async executeAction(action: ActionPayload, retries = 2): Promise<void> {
     this.ensurePage();
-    try {
-      await this.page!.waitForTimeout(400);
-      await this.page!.screenshot({
-        path: filepath,
-        fullPage: false,
-        animations: 'disabled',
-      });
-      console.log(`Screenshot: ${filepath}`);
-    } catch {
-      console.error('Screenshot failed');
-    }
+    return this.actionExecutor.execute(action, retries);
   }
 
   async getSimplifiedDOM(): Promise<string> {
@@ -147,10 +93,25 @@ export class PlaywrightManager {
     return this.domExtractor.extract(this.page!);
   }
 
+  async screenshot(filepath: string): Promise<void> {
+    this.ensurePage();
+    try {
+      await this.page!.waitForTimeout(400); // Allow animations to settle
+      await this.page!.screenshot({
+        path: filepath,
+        fullPage: false,
+        animations: 'disabled',
+      });
+      console.log(`Screenshot saved: ${filepath}`);
+    } catch (err) {
+      console.error('Screenshot failed:', err);
+    }
+  }
+
   async captureStateWithMetadata(step: number, taskName: string): Promise<void> {
     this.ensurePage();
     const dir = `output/screenshots/${taskName}`;
-    const screenshotPath = `${dir}/step_${String(step).padStart(3, '0')}.png`;
+    const screenshotPath = path.join(dir, `step_${String(step).padStart(3, '0')}.png`);
     const metadataPath = screenshotPath.replace('.png', '_meta.json');
 
     if (!fs.existsSync(dir)) {
@@ -168,13 +129,26 @@ export class PlaywrightManager {
       };
       fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));
     } catch {
-      // Metadata save is non-critical
+      // Metadata is non-critical, ignore write errors
     }
   }
 
-  async executeAction(action: ActionPayload, retries = 2): Promise<void> {
-    this.ensurePage();
-    return this.actionExecutor.execute(action, retries);
+  async saveSession(): Promise<void> {
+    if (!this.context) return;
+    await this.sessionManager.saveSession(this.context);
+  }
+
+  async close(): Promise<void> {
+    this.isClosing = true;
+    try {
+      await this.saveSession();
+      await this.page?.close();
+      await this.context?.close();
+      await this.browser?.close();
+      console.log('Browser shutdown complete');
+    } catch (err) {
+      console.warn('Error during browser shutdown (ignored):', err);
+    }
   }
 
   async waitForStable(ms = 3000): Promise<void> {
@@ -182,10 +156,12 @@ export class PlaywrightManager {
     try {
       await this.page.waitForLoadState('networkidle', { timeout: ms });
     } catch {
-      // SPAs often don't reach networkidle - not an error
+      // SPAs often never reach true networkidle; proceed anyway
     }
     await this.page.waitForTimeout(600);
   }
+
+  // --- State Accessors ---
 
   getLastIssueTitle(): string | null {
     return this.lastIssueTitle;
@@ -195,9 +171,31 @@ export class PlaywrightManager {
     this.lastIssueTitle = title;
   }
 
+  // --- Internals ---
+
   private ensurePage(): void {
     if (!this.page || this.page.isClosed()) {
-      throw new Error('Page not initialized');
+      throw new Error('PlaywrightManager: Page not initialized or closed');
     }
   }
+
+  private setupEventHandlers(page: Page): void {
+    page.on('close', () => {
+      if (!this.isClosing) console.warn('Warning: Page closed unexpectedly');
+    });
+    page.on('crash', () => console.error('Critical: Page crashed'));
+    page.on('framenavigated', (frame) => {
+      if (frame === page.mainFrame()) {
+        console.log(`Navigated to: ${frame.url()}`);
+      }
+    });
+  }
+
+  private initializeHelpers(page: Page): void {
+    this.elementFinder = new ElementFinder(page, this);
+    this.actionExecutor = new ActionExecutor(page, this.elementFinder, this);
+    this.sessionManager = new SessionManager();
+    this.domExtractor = new DOMExtractor();
+  }
 }
+
