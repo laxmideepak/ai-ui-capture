@@ -43,6 +43,19 @@ export class ActionExecutor {
           element = await this.finder.fallbackFind(action.target);
         }
 
+        // NEW: If looking for description and failing, try more aggressively
+        if (!element && /description/i.test(action.target) && action.type === 'type') {
+          console.log('Description field not found - trying aggressive search');
+          const anyEditable = this.page.locator('[contenteditable="true"]').last();
+          if (await this.finder.isVisible(anyEditable)) {
+            const role = await anyEditable.getAttribute('role').catch(() => null);
+            if (role !== 'button') {
+              element = anyEditable;
+              console.log('Using last contenteditable as description field');
+            }
+          }
+        }
+
         if (!element) {
           if (await this.tryShortcut(action)) return;
           
@@ -94,32 +107,36 @@ export class ActionExecutor {
     await element.scrollIntoViewIfNeeded();
     await this.page.waitForTimeout(300);
 
-    // Analyze element characteristics
-    let { tag, contentEditable, role, isNotion } = await element.evaluate((el) => ({
-      tag: el.tagName.toLowerCase(),
-      contentEditable: el.getAttribute('contenteditable'),
-      role: el.getAttribute('role'),
-      isNotion: el.closest('[class*="notion"]') !== null || el.getAttribute('data-content-root') !== null,
-    }));
+    // Get element details
+    let [tag, contentEditable, role, isButton] = await element.evaluate((el) => [
+      el.tagName.toLowerCase(),
+      el.getAttribute('contenteditable'),
+      el.getAttribute('role'),
+      el.tagName.toLowerCase() === 'button' || el.getAttribute('role') === 'button',
+    ]);
+
+    // CRITICAL: Don't try to type into buttons
+    if (isButton) {
+      console.error(`Attempted to type into a button - this is wrong: "${action.target}"`);
+      throw new Error(`Cannot type into button element: "${action.target}"`);
+    }
 
     // If we found a label, re-resolve to the input
     if (tag === 'label') {
-      console.log('Resolving label to input...');
+      console.log('Found label, resolving to input field');
       const resolved = await this.finder.resolveLabelToInput(element);
       if (!resolved) throw new Error('Found label but could not resolve to input field');
       
       element = resolved;
       // Re-evaluate props for the actual input
-      const newProps = await element.evaluate((el) => ({
-        tag: el.tagName.toLowerCase(),
-        contentEditable: el.getAttribute('contenteditable'),
-        role: el.getAttribute('role'),
-        isNotion: el.closest('[class*="notion"]') !== null || el.getAttribute('data-content-root') !== null,
-      }));
-      tag = newProps.tag;
-      contentEditable = newProps.contentEditable;
-      role = newProps.role;
-      isNotion = newProps.isNotion;
+      const newProps = await element.evaluate((el) => [
+        el.tagName.toLowerCase(),
+        el.getAttribute('contenteditable'),
+        el.getAttribute('role'),
+      ]);
+      tag = newProps[0];
+      contentEditable = newProps[1];
+      role = newProps[2];
     }
 
     const isEditable = 
@@ -130,8 +147,14 @@ export class ActionExecutor {
       role === 'textbox';
 
     if (!isEditable) {
-      throw new Error(`Target element is not editable (tag=${tag}, role=${role})`);
+      console.error(`Element is not editable: tag=${tag}, role=${role}, contenteditable=${contentEditable}`);
+      throw new Error(`Not editable: ${tag}, role=${role}, contenteditable=${contentEditable}`);
     }
+
+    // Check if it's Notion for contenteditable handling
+    const isNotion = await element.evaluate((el) => 
+      el.closest('[class*="notion"]') !== null || el.getAttribute('data-content-root') !== null
+    );
 
     console.log(`Typing into ${tag} ${isNotion ? '(Notion)' : ''}`);
     await element.click({ force: true });

@@ -104,8 +104,8 @@ export class NavigationAgent {
             complete = true;
           }
 
-          // Periodic session save
-          if (step % 3 === 0 && (await this.pw.isLoggedIn())) {
+          // Periodic session save (less frequent, only on key states)
+          if ((step % 5 === 0 || decision.isKeyState) && (await this.pw.isLoggedIn())) {
             await this.pw.saveSession();
           }
         }
