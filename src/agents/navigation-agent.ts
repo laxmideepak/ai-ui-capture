@@ -2,9 +2,12 @@ import fs from 'fs';
 import path from 'path';
 import { GPT4Client } from '../utils/gpt-client';
 import { PlaywrightManager } from '../automation/playwright-manager';
-import { VISION_DECISION_PROMPT, TASK_PLANNING_PROMPT } from '../utils/prompts';
+import { VISION_DECISION_PROMPT, TASK_PLANNING_PROMPT, VISION_DECISION_PROMPT_SOM } from '../utils/prompts';
 import { config } from '../utils/config';
 import { generateDataset } from '../output/generate-dataset';
+import { SetOfMarksGenerator } from '../perception/som-generator';
+import { StateObserver } from '../perception/state-observer';
+import { UniversalElementResolver } from '../execution/universal-element-resolver';
 
 export interface ActionEntry {
   step: number;
@@ -46,7 +49,19 @@ export class NavigationAgent {
     // 2. Auth Check
     await this.ensureSession();
 
-    // 3. Execution Loop
+    // 3. Initialize SoM and State Observer
+    const somGenerator = new SetOfMarksGenerator(this.pw.getPage());
+    const stateObserver = new StateObserver(this.pw.getPage());
+
+    // Start observing state changes
+    await stateObserver.startObserving(async (change) => {
+      console.log(`State change detected: ${change.description}`);
+      if (change.requiresScreenshot) {
+        await this.captureStateWithSoM(history.length, taskName, somGenerator);
+      }
+    });
+
+    // 4. Execution Loop
     let step = 0;
     let complete = false;
 
@@ -67,37 +82,62 @@ export class NavigationAgent {
           continue;
         }
 
-        // B. Capture State
-        await this.captureState(step, taskName, history);
-        const screenshotPath = path.join(screenshotDir, `step_${String(step).padStart(3, '0')}.png`);
-        const domContext = await this.getRobustDOM();
+        // B. PERCEPTION - Generate Set-of-Marks
+        const { elements, annotatedScreenshot } = await somGenerator.generate();
+        
+        // C. CONTEXT - Extract accessibility tree (structured)
+        const accessibilityTree = await this.extractAccessibilityTree();
         const currentUrl = this.pw.getCurrentUrl();
 
-        // C. Build Prompt
+        // D. Build Prompt (SoM-aware)
         const recoveryContext = this.buildRecoveryContext(history);
-        const prompt = VISION_DECISION_PROMPT
+        const prompt = VISION_DECISION_PROMPT_SOM
           .replace('{objective}', task)
-          .replace('{actionHistory}', JSON.stringify(this.compactHistory(history.slice(-3))))
-          .replace('{domContext}', domContext.substring(0, 3000))
           .replace('{currentUrl}', currentUrl)
+          .replace('{accessibilityTree}', JSON.stringify(accessibilityTree, null, 2))
+          .replace('{actionHistory}', JSON.stringify(this.compactHistory(history.slice(-3))))
           .replace('{recoveryContext}', recoveryContext);
 
-        // D. Decide
-        const decision = await this.gpt.analyzeScreenshot(screenshotPath, prompt);
+        // E. REASONING - GPT-4V decides next action with SoM IDs
+        const decision = await this.gpt.analyzeScreenshot(annotatedScreenshot, prompt);
         
-        // E. Refine Decision (Business Logic Heuristics)
+        // F. Refine Decision (Business Logic Heuristics)
         this.refineDecision(decision, history, task);
 
-        console.log(`Decision: ${decision.nextAction.type} -> "${decision.nextAction.target}"`);
+        console.log(`Decision: ${decision.nextAction.type} -> somId: ${(decision.nextAction as any).somId || 'N/A'}`);
         console.log(`Reasoning: ${decision.nextAction.reasoning}`);
         console.log(`Progress: ${decision.progressAssessment}%`);
 
-        // F. Execute or Complete
+        // G. EXECUTION - Resolve element and execute
         if (decision.nextAction.type === 'complete') {
           complete = true;
           console.log('Task marked as complete by agent.');
         } else {
-          await this.pw.executeAction(decision.nextAction);
+          const resolver = new UniversalElementResolver(this.pw.getPage(), elements);
+          
+          if ((decision.nextAction as any).somId && (decision.nextAction as any).somId > 0) {
+            const element = await resolver.resolveByID((decision.nextAction as any).somId);
+            if (element) {
+              await this.executeActionOnElement(decision.nextAction, element, resolver);
+            } else {
+              console.error(`Failed to resolve SoM ID: ${(decision.nextAction as any).somId}`);
+              // Fallback to description-based resolution
+              const fallback = await resolver.resolveByDescription(decision.nextAction.reasoning);
+              if (fallback) {
+                await this.executeActionOnElement(decision.nextAction, fallback, resolver);
+              }
+            }
+          } else {
+            // No valid somId - try description-based resolution
+            const element = await resolver.resolveByDescription(decision.nextAction.reasoning || decision.nextAction.target);
+            if (element) {
+              await this.executeActionOnElement(decision.nextAction, element, resolver);
+            } else {
+              console.error(`Failed to resolve element for action: ${decision.nextAction.type} -> ${decision.nextAction.target}`);
+              // Wait and continue - let the next iteration try again
+              await this.pw.getPage().waitForTimeout(1000);
+            }
+          }
           
           // Post-action check: Auto-complete if we detect success patterns
           if (this.checkImplicitCompletion(task, decision, history)) {
@@ -110,7 +150,7 @@ export class NavigationAgent {
           }
         }
 
-        // G. Record History
+        // H. Record History
         history.push({
           step,
           action: decision.nextAction,
@@ -128,6 +168,7 @@ export class NavigationAgent {
     } catch (error) {
       console.error(`Execution Fatal Error: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      await stateObserver.stopObserving();
       await this.finalize(taskName, history, step);
     }
 
@@ -286,15 +327,6 @@ export class NavigationAgent {
     return false;
   }
 
-  private async getRobustDOM(): Promise<string> {
-    let dom = await this.pw.getSimplifiedDOM();
-    if (dom === '[]' || dom.length < 10) {
-      console.warn('DOM empty, retrying after wait...');
-      await this.pw.waitForStable();
-      dom = await this.pw.getSimplifiedDOM();
-    }
-    return dom;
-  }
 
   private buildRecoveryContext(history: ActionEntry[]): string {
     const failures = history.slice(-3).filter(h => 
@@ -422,5 +454,91 @@ export class NavigationAgent {
     );
 
     return (sameAction && stagnant) || errors;
+  }
+
+  private async extractAccessibilityTree(): Promise<any> {
+    return await this.pw.getPage().evaluate(() => {
+      // @ts-ignore - document is available in browser context
+      const tree: any = { children: [] };
+      
+      function buildTree(node: any, parent: any) {
+        const role = node.getAttribute('role') || node.tagName.toLowerCase();
+        const name = node.getAttribute('aria-label') || 
+                     (node.textContent?.trim().substring(0, 30) || '') || 
+                     (node.placeholder || '');
+        
+        if (role && name) {
+          const item = { role, name, children: [] };
+          parent.children.push(item);
+          
+          Array.from(node.children).forEach((child: any) => buildTree(child, item));
+        }
+      }
+      
+      // @ts-ignore - document is available in browser context
+      buildTree(document.body, tree);
+      return tree;
+    });
+  }
+
+  private async captureStateWithSoM(step: number, taskName: string, somGenerator: SetOfMarksGenerator): Promise<void> {
+    const { annotatedScreenshot } = await somGenerator.generate();
+    const screenshotDir = path.join(config.paths.screenshots, taskName);
+    const targetPath = path.join(screenshotDir, `step_${String(step).padStart(3, '0')}_som.png`);
+    
+    if (!fs.existsSync(screenshotDir)) {
+      fs.mkdirSync(screenshotDir, { recursive: true });
+    }
+    
+    // Copy the SoM screenshot to the target location
+    if (fs.existsSync(annotatedScreenshot)) {
+      fs.copyFileSync(annotatedScreenshot, targetPath);
+    }
+  }
+
+  private async executeActionOnElement(action: any, element: any, resolver: UniversalElementResolver): Promise<void> {
+    const page = this.pw.getPage();
+    
+    try {
+      if (action.type === 'click') {
+        if (element && typeof element.click === 'function') {
+          await element.scrollIntoViewIfNeeded();
+          await page.waitForTimeout(300);
+          await element.click({ timeout: 5000 });
+          console.log(`Clicked element via SoM resolution`);
+        } else {
+          // Coordinate-based click already happened in resolver
+          console.log(`Clicked element via coordinate fallback`);
+          await page.waitForTimeout(500);
+        }
+      } else if (action.type === 'type') {
+        if (element && typeof element.fill === 'function') {
+          await element.fill(action.value || '');
+          console.log(`Typed "${action.value}" via fill`);
+        } else if (element && typeof element.type === 'function') {
+          await element.type(action.value || '', { delay: 50 });
+          console.log(`Typed "${action.value}" via type`);
+        } else {
+          // Fallback: use keyboard typing
+          await page.keyboard.type(action.value || '', { delay: 50 });
+          console.log(`Typed "${action.value}" via keyboard`);
+        }
+      } else if (action.type === 'navigate') {
+        await this.pw.navigate(action.target || action.value);
+        console.log(`Navigated to: ${action.target || action.value}`);
+      } else if (action.type === 'wait') {
+        await page.waitForTimeout(3000);
+        console.log('Waited 3 seconds');
+      } else if (action.type === 'scroll') {
+        await page.keyboard.press('PageDown');
+        console.log('Scrolled down');
+      }
+      
+      // Wait for UI to stabilize after action
+      await this.pw.waitForStable();
+    } catch (error) {
+      console.error(`Action execution failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
   }
 }

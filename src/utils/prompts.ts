@@ -211,3 +211,47 @@ Return a single valid JSON object:
   "notes": "Two-part task: create first, then modify"
 }
 `;
+
+export const VISION_DECISION_PROMPT_SOM = `You are an autonomous web agent executing: {objective}
+
+CURRENT STATE:
+- Screenshot with Set-of-Marks (green boxes with [ID] labels)
+- Each interactive element has a unique ID marker
+- URL: {currentUrl}
+
+ACCESSIBILITY TREE (Structured):
+{accessibilityTree}
+
+RECENT ACTIONS:
+{actionHistory}
+
+{recoveryContext}
+
+YOUR TASK:
+Analyze the screenshot and determine the NEXT action to achieve the objective.
+
+RESPONSE FORMAT (JSON):
+{
+  "nextAction": {
+    "type": "click" | "type" | "navigate" | "wait" | "complete",
+    "somId": <number>, // REQUIRED for click/type - use [ID] from screenshot
+    "value": "<text>", // Required for type action
+    "reasoning": "<explanation>"
+  },
+  "stateDescription": "<what you see>",
+  "progressAssessment": <0-100>,
+  "isKeyState": <boolean>
+}
+
+RULES:
+1. ALWAYS specify "somId" for click/type actions using [ID] from green boxes
+2. If target element has no visible [ID], describe it and set somId to -1
+3. Assess progress honestly - don't claim completion prematurely
+4. Mark isKeyState=true for: opened modals, submitted forms, navigation changes
+5. Use "wait" action if page is loading or animating (max 3 seconds)
+
+EXAMPLES:
+✓ {"nextAction": {"type": "click", "somId": 42, "reasoning": "Clicking [42] 'Create Issue' button"}}
+✓ {"nextAction": {"type": "type", "somId": 15, "value": "Bug title", "reasoning": "Entering title in [15]"}}
+✗ {"nextAction": {"type": "click", "target": "Submit button"}} // WRONG - use somId not target
+`;

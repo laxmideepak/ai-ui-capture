@@ -2,9 +2,6 @@ import fs from 'fs';
 import path from 'path';
 import { Browser, BrowserContext, Page, chromium } from 'playwright';
 import { config } from '../utils/config';
-import { ActionExecutor } from './action-executor';
-import { DOMExtractor } from './dom-extractor';
-import { ElementFinder } from './element-finder';
 import { SessionManager } from './session-manager';
 
 export interface ActionPayload {
@@ -20,10 +17,7 @@ export class PlaywrightManager {
   private page: Page | null = null;
   
   // Helpers
-  private elementFinder!: ElementFinder;
-  private actionExecutor!: ActionExecutor;
   private sessionManager!: SessionManager;
-  private domExtractor!: DOMExtractor;
 
   // State
   private lastIssueTitle: string | null = null;
@@ -60,6 +54,11 @@ export class PlaywrightManager {
     return this.page?.url() || '';
   }
 
+  getPage(): Page {
+    this.ensurePage();
+    return this.page!;
+  }
+
   async navigate(url: string): Promise<void> {
     this.ensurePage();
     
@@ -83,15 +82,7 @@ export class PlaywrightManager {
     return this.sessionManager.isLoggedIn(this.page!);
   }
 
-  async executeAction(action: ActionPayload, retries = 2): Promise<void> {
-    this.ensurePage();
-    return this.actionExecutor.execute(action, retries);
-  }
 
-  async getSimplifiedDOM(): Promise<string> {
-    this.ensurePage();
-    return this.domExtractor.extract(this.page!);
-  }
 
   async screenshot(filepath: string): Promise<void> {
     this.ensurePage();
@@ -192,10 +183,7 @@ export class PlaywrightManager {
   }
 
   private initializeHelpers(page: Page): void {
-    this.elementFinder = new ElementFinder(page, this);
-    this.actionExecutor = new ActionExecutor(page, this.elementFinder, this);
     this.sessionManager = new SessionManager();
-    this.domExtractor = new DOMExtractor();
   }
 }
 
