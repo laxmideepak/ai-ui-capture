@@ -37,14 +37,8 @@ export class SessionManager {
         return false;
       }
 
-      // Platform-specific checks
-      if (url.includes('linear.app')) return await this.checkLinearAuth(page);
-      if (url.includes('notion.so') || url.includes('notion.com')) return await this.checkNotionAuth(page);
-      if (url.includes('asana.com')) return await this.checkAsanaAuth(page);
-
-      // Default assumption: If not on login page, we are likely logged in
-      console.log('Auth Status: Generic logged-in check passed');
-      return true;
+      // Generic workspace detection - look for common workspace indicators
+      return await this.checkGenericAuth(page);
 
     } catch (error) {
       console.error('Auth Check Failed:', error);
@@ -56,33 +50,43 @@ export class SessionManager {
     return url.includes('/login') || url.includes('/signin') || url.includes('/auth');
   }
 
-  private async checkLinearAuth(page: Page): Promise<boolean> {
-    const selector = '[data-testid*="sidebar"], [aria-label*="Issues" i], a[href*="/issue/"]';
-    const hasWorkspace = await page.locator(selector).count() > 0;
-    
-    console.log(hasWorkspace ? 'Auth: Linear workspace active' : 'Auth: No Linear workspace found');
-    return hasWorkspace;
-  }
+  private async checkGenericAuth(page: Page): Promise<boolean> {
+    // Generic workspace indicators that work across apps
+    const workspaceIndicators = [
+      // Sidebars and navigation
+      '[data-testid*="sidebar"]',
+      '[aria-label*="sidebar" i]',
+      '[class*="sidebar" i]',
+      '[class*="Sidebar" i]',
+      // Navigation menus
+      'nav',
+      '[role="navigation"]',
+      // User avatars/menus
+      '[aria-label*="user" i]',
+      '[aria-label*="account" i]',
+      '[class*="avatar" i]',
+      '[class*="Avatar" i]',
+      // Workspace indicators
+      '[data-testid*="workspace"]',
+      '[aria-label*="workspace" i]',
+      // Content areas (not login forms)
+      '[contenteditable="true"]',
+      '[role="main"]',
+      // Common app-specific content
+      'a[href*="/issue/"]',
+      'a[href*="/task/"]',
+      'a[href*="/project/"]',
+    ];
 
-  private async checkNotionAuth(page: Page): Promise<boolean> {
-    const sidebarCount = await page.locator('[data-testid*="sidebar"], [data-testid*="workspace"], [class*="sidebar"]').count();
-    if (sidebarCount > 0) {
-      console.log('Auth: Notion workspace active');
-      return true;
+    let indicatorCount = 0;
+    for (const selector of workspaceIndicators) {
+      const count = await page.locator(selector).count();
+      indicatorCount += count;
+      if (count > 0) break; // Found at least one indicator
     }
-    
-    const contentCount = await page.locator('[contenteditable="true"], [class*="notion-page"]').count();
-    return contentCount > 0;
-  }
 
-  private async checkAsanaAuth(page: Page): Promise<boolean> {
-    const sidebarCount = await page.locator('[data-testid*="sidebar"], [aria-label*="workspace" i], [class*="Sidebar"]').count();
-    if (sidebarCount > 0) {
-      console.log('Auth: Asana workspace active');
-      return true;
-    }
-    
-    const taskListCount = await page.locator('[class*="Task"], [class*="Project"]').count();
-    return taskListCount > 0;
+    const isLoggedIn = indicatorCount > 0;
+    console.log(isLoggedIn ? 'Auth: Workspace indicators detected' : 'Auth: No workspace indicators found');
+    return isLoggedIn;
   }
 }

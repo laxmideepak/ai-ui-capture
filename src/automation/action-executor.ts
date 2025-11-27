@@ -181,39 +181,28 @@ export class ActionExecutor {
 
   private async handlePostTypeActions(target: string): Promise<void> {
     const targetLower = target.toLowerCase();
-    const isUrlSettings = this.page.url().includes('/settings/');
-
-    if (/issue title|^title$/.test(targetLower)) {
-      console.log('Action: Auto-submit (Cmd+Enter) for issue');
+    
+    // Generic form auto-submit detection
+    // Check if we're in a modal/dialog (likely a creation form)
+    const isInModal = await this.page.locator('[role="dialog"], [role="alertdialog"], [aria-modal="true"]').isVisible().catch(() => false);
+    
+    // Title/name fields in modals often trigger auto-submit
+    if (isInModal && (/title|name|subject/i.test(targetLower) && !/description|body|note|comment/i.test(targetLower))) {
+      console.log('Action: Auto-submit (Cmd+Enter) for form creation');
       await this.page.keyboard.press('Meta+Enter');
       await this.page.waitForTimeout(2000);
-    } else if (/description/.test(targetLower)) {
-      console.log('Action: Auto-save (Cmd+Enter) for description');
+    } 
+    // Description/body/note fields may auto-save
+    else if (/description|body|note|details/i.test(targetLower) && !/title|name/i.test(targetLower)) {
+      console.log('Action: Auto-save (Cmd+Enter) for rich text field');
       await this.page.keyboard.press('Meta+Enter');
       await this.manager.waitForStable(1500);
-    } else if (/comment/.test(targetLower)) {
+    } 
+    // Comment fields typically auto-submit
+    else if (/comment/i.test(targetLower)) {
       console.log('Action: Auto-submit (Cmd+Enter) for comment');
       await this.page.keyboard.press('Meta+Enter');
       await this.manager.waitForStable(1500);
-    } else if (/full name|name|username|email|profile/i.test(targetLower) && isUrlSettings) {
-      await this.handleSettingsSave();
-    }
-  }
-
-  private async handleSettingsSave(): Promise<void> {
-    console.log('Settings detected - searching for Save action');
-    await this.page.waitForTimeout(500);
-    
-    const saveButton = await this.finder.findSaveButton();
-    if (saveButton) {
-      await saveButton.click();
-      await this.manager.waitForStable(1000);
-    } else {
-      console.log('No save button found - attempting Tab+Enter');
-      await this.page.keyboard.press('Tab');
-      await this.page.waitForTimeout(300);
-      await this.page.keyboard.press('Enter');
-      await this.manager.waitForStable(1000);
     }
   }
 
@@ -268,14 +257,15 @@ export class ActionExecutor {
 
   private async autoSelectMenuOption(target: string): Promise<void> {
     const lower = target.toLowerCase();
-    const match = lower.match(/(?:to|select|set)\s+(done|high|urgent|in progress|todo|low|medium|backlog)/i);
+    await this.page.waitForTimeout(800);
     
+    // Match status or other dropdown options from target text
+    const match = lower.match(/(?:to|select|set)\s+(done|in progress|todo|low|medium|backlog)/i);
     if (match) {
       const option = match[1];
       console.log(`Menu open: Auto-selecting "${option}"`);
-      await this.page.waitForTimeout(800);
       
-      const optionLocator = this.page.getByText(option, { exact: false }).first();
+      const optionLocator = this.page.locator(`[role="menu"], [role="listbox"]`).getByText(option, { exact: false }).first();
       if (await this.finder.isVisible(optionLocator)) {
         await optionLocator.click({ timeout: 3000 });
       }

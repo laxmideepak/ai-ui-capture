@@ -138,7 +138,8 @@ export class NavigationAgent {
 
   private async createExecutionPlan(task: string): Promise<ExecutionPlan> {
     const appName = this.detectApp(task);
-    const baseUrl = appName === 'notion' ? config.urls.notion : config.urls.linear;
+    // Generic URL selection - use detected app or current URL domain
+    const baseUrl = this.getBaseUrlForApp(appName);
     let maxSteps = config.agent.maxSteps;
 
     try {
@@ -337,9 +338,52 @@ export class NavigationAgent {
 
   private detectApp(task: string): string {
     const lower = task.toLowerCase();
+    // Detect app from task description or URL patterns
     if (lower.includes('notion')) return 'notion';
     if (lower.includes('asana')) return 'asana';
-    return 'linear';
+    if (lower.includes('linear')) return 'linear';
+    if (lower.includes('github')) return 'github';
+    if (lower.includes('jira')) return 'jira';
+    if (lower.includes('trello')) return 'trello';
+    
+    // Try to detect from current URL
+    const currentUrl = this.pw.getCurrentUrl();
+    if (currentUrl.includes('notion.so') || currentUrl.includes('notion.com')) return 'notion';
+    if (currentUrl.includes('asana.com')) return 'asana';
+    if (currentUrl.includes('linear.app')) return 'linear';
+    if (currentUrl.includes('github.com')) return 'github';
+    if (currentUrl.includes('jira')) return 'jira';
+    if (currentUrl.includes('trello.com')) return 'trello';
+    
+    // Default to generic - let the system figure it out
+    return 'generic';
+  }
+
+  private getBaseUrlForApp(appName: string): string {
+    // Map app names to URLs, fallback to current URL or generic
+    const urlMap: Record<string, string> = {
+      notion: config.urls.notion,
+      asana: config.urls.asana,
+      linear: config.urls.linear,
+    };
+    
+    if (urlMap[appName]) {
+      return urlMap[appName];
+    }
+    
+    // For unknown apps, try to extract from current URL
+    const currentUrl = this.pw.getCurrentUrl();
+    if (currentUrl) {
+      try {
+        const urlObj = new URL(currentUrl);
+        return `${urlObj.protocol}//${urlObj.host}`;
+      } catch {
+        // Invalid URL, use default
+      }
+    }
+    
+    // Ultimate fallback
+    return config.urls.linear; // Keep as fallback but should rarely be used
   }
 
   private sanitizeTaskName(task: string): string {

@@ -12,8 +12,8 @@ export class ElementFinder {
   async findElement(target: string): Promise<Locator | null> {
     console.log(`Finding element for target: "${target}"`);
 
-    // 1. Specialized Field Handlers
-    if (/issue title|^title$/i.test(target)) return this.findTitleField();
+    // 1. Specialized Field Handlers (semantic, not app-specific)
+    if (/^title$|title field|item title|task title|issue title/i.test(target)) return this.findTitleField();
     // Description field detection - exclude button text "Add description..."
     if (/description/i.test(target) && !/^add description/i.test(target)) {
       const descField = await this.findDescriptionField();
@@ -28,22 +28,22 @@ export class ElementFinder {
       return this.findStatusField();
     }
 
-    // 2. Issue ID Pattern (e.g., PROJ-123)
-    const issueMatch = target.match(/^([A-Z]{2,10}-\d+)/i);
-    if (issueMatch) {
-      return this.findIssue(issueMatch[1]);
-    }
-
-    // 3. Notifications
-    if (/notification/i.test(target)) {
-      const notification = await this.findByPatterns(this.getNotificationPatterns());
-      if (notification) {
-        console.log('Found notification element');
-        return notification;
+    // 2. Item ID Pattern (e.g., PROJ-123, TASK-456, #123, etc.)
+    // Matches common ID patterns: ALPHA-NUM, #NUM, or standalone IDs
+    const idPatterns = [
+      /^([A-Z]{2,10}-\d+)/i,  // PROJ-123, TASK-456
+      /^#(\d+)/i,              // #123, #456
+      /^([A-Z]+\d+)/i,         // ABC123
+    ];
+    
+    for (const pattern of idPatterns) {
+      const match = target.match(pattern);
+      if (match) {
+        return this.findItemById(match[1] || match[0]);
       }
     }
 
-    // 4. Dialogs (Priority Search)
+    // 3. Dialogs (Priority Search)
     const dialogResult = await this.findInDialog(target);
     if (dialogResult) {
       console.log(`Found target in dialog: "${target}"`);
@@ -108,7 +108,7 @@ export class ElementFinder {
     
     if (issueMatch) {
       const issueId = issueMatch[1];
-      const issueLink = await this.findIssue(issueId);
+      const issueLink = await this.findItemById(issueId);
       
       if (issueLink) {
         console.log(`Clicking issue ${issueId} to reveal status`);
@@ -152,11 +152,14 @@ export class ElementFinder {
   }
 
   private async findTitleField(): Promise<Locator | null> {
+    // Generic title field detection - looks for common title/name field patterns
     const selectors = [
-      'input[placeholder*="Issue title" i]',
       'input[placeholder*="title" i]:not([type="search"])',
+      'input[placeholder*="name" i]:not([type="search"])',
       'div[contenteditable="true"][placeholder*="title" i]',
-      '[role="dialog"] input[type="text"]',
+      'div[contenteditable="true"][placeholder*="name" i]',
+      '[role="dialog"] input[type="text"]:first-of-type',
+      '[role="dialog"] input[type="text"]:not([type="search"])',
     ];
 
     for (const selector of selectors) {
@@ -207,14 +210,14 @@ export class ElementFinder {
     // 2. Look for contenteditable divs that might be description fields
     const contentEditables = await this.page.locator('div[contenteditable="true"]').all();
     for (const editable of contentEditables) {
-      const placeholder = await editable.getAttribute('placeholder').catch(() => '');
-      const dataPlaceholder = await editable.getAttribute('data-placeholder').catch(() => '');
+      const placeholder = await editable.getAttribute('placeholder').catch(() => '') || '';
+      const dataPlaceholder = await editable.getAttribute('data-placeholder').catch(() => '') || '';
       const role = await editable.getAttribute('role').catch(() => null);
       
       if (role !== 'button' && (placeholder.toLowerCase().includes('description') || 
           dataPlaceholder.toLowerCase().includes('description') ||
           (placeholder === '' && dataPlaceholder === ''))) {
-        const text = await editable.textContent().catch(() => '');
+        const text = (await editable.textContent().catch(() => '')) || '';
         // If it's empty or has minimal text, it's likely the description field
         if (text.trim().length < 50) {
           console.log('Found description field via contenteditable search');
@@ -223,36 +226,48 @@ export class ElementFinder {
       }
     }
 
-    // 3. If no field found, try clicking "Add description" button
-    const addButton = this.page.getByText('Add description', { exact: false }).first();
-    if (await this.isVisible(addButton)) {
-      console.log('Clicking "Add description" button to reveal field');
-      await addButton.click();
-      await this.manager.waitForStable(1000); // Give it time to appear
-      
-      // Retry search after button click
-      for (const selector of selectors) {
-        const locator = this.page.locator(selector).first();
-        if (await this.isVisible(locator)) {
-          const tag = await locator.evaluate((el) => el.tagName.toLowerCase());
-          if (tag === 'div' || tag === 'textarea') {
-            console.log(`Found description field after button click: ${selector}`);
-            return locator;
+    // 3. If no field found, try clicking common "add description/note/body" buttons
+    const addButtonPatterns = [
+      this.page.getByText(/add description/i, { exact: false }),
+      this.page.getByText(/add note/i, { exact: false }),
+      this.page.getByText(/add body/i, { exact: false }),
+      this.page.getByText(/add details/i, { exact: false }),
+      this.page.locator('button:has-text(/add.*description/i)'),
+      this.page.locator('button:has-text(/add.*note/i)'),
+    ];
+    
+    for (const buttonPattern of addButtonPatterns) {
+      const addButton = buttonPattern.first();
+      if (await this.isVisible(addButton)) {
+        console.log('Clicking button to reveal description field');
+        await addButton.click();
+        await this.manager.waitForStable(1000); // Give it time to appear
+        
+        // Retry search after button click
+        for (const selector of selectors) {
+          const locator = this.page.locator(selector).first();
+          if (await this.isVisible(locator)) {
+            const tag = await locator.evaluate((el) => el.tagName.toLowerCase());
+            if (tag === 'div' || tag === 'textarea') {
+              console.log(`Found description field after button click: ${selector}`);
+              return locator;
+            }
           }
         }
-      }
-      
-      // Also check contenteditables again after click
-      const newEditables = await this.page.locator('div[contenteditable="true"]').all();
-      for (const editable of newEditables) {
-        const role = await editable.getAttribute('role').catch(() => null);
-        if (role !== 'button') {
-          const text = await editable.textContent().catch(() => '');
-          if (text.trim().length < 50) {
-            console.log('Found description field after button click via contenteditable');
-            return editable;
+        
+        // Also check contenteditables again after click
+        const newEditables = await this.page.locator('div[contenteditable="true"]').all();
+        for (const editable of newEditables) {
+          const role = await editable.getAttribute('role').catch(() => null);
+          if (role !== 'button') {
+            const text = (await editable.textContent().catch(() => '')) || '';
+            if (text.trim().length < 50) {
+              console.log('Found description field after button click via contenteditable');
+              return editable;
+            }
           }
         }
+        break; // Only try first matching button
       }
     }
 
@@ -285,13 +300,9 @@ export class ElementFinder {
     return locator;
   }
 
-  async findSaveButton(): Promise<Locator | null> {
-    return this.findByPatterns(this.getSaveButtonPatterns());
-  }
-
-  private async findIssue(issueId: string): Promise<Locator | null> {
-    console.log(`Searching for issue: ${issueId}`);
-    const id = issueId.toUpperCase();
+  private async findItemById(itemId: string): Promise<Locator | null> {
+    console.log(`Searching for item: ${itemId}`);
+    const id = itemId.toUpperCase();
     const idLower = id.toLowerCase();
 
     // Strategy 1: Visible Text -> Ancestor Anchor
@@ -300,44 +311,56 @@ export class ElementFinder {
       const parent = byText.locator('xpath=ancestor::a').first();
       if (await this.isVisible(parent)) {
         const href = await parent.getAttribute('href');
-        if (href && (href.includes(`/${idLower}/`) || href.includes(`/${id}/`))) {
+        if (href && (href.includes(`/${idLower}/`) || href.includes(`/${id}/`) || href.includes(`#${idLower}`))) {
           return parent;
         }
       }
       // Check if text element itself is the link
       const textHref = await byText.getAttribute('href').catch(() => null);
-      if (textHref && (textHref.includes(`/${idLower}/`) || textHref.includes(`/${id}/`))) {
+      if (textHref && (textHref.includes(`/${idLower}/`) || textHref.includes(`/${id}/`) || textHref.includes(`#${idLower}`))) {
         return byText.first();
       }
     }
 
-    // Strategy 2: Data Attribute
-    const byData = this.page.locator(`[data-issue-id="${id}"], [data-issue-id="${idLower}"]`);
-    if (await this.isVisible(byData)) return byData.first();
+    // Strategy 2: Data Attributes (generic item ID patterns)
+    const dataPatterns = [
+      `[data-item-id="${id}"]`,
+      `[data-item-id="${idLower}"]`,
+      `[data-id="${id}"]`,
+      `[data-id="${idLower}"]`,
+      `[data-issue-id="${id}"]`,
+      `[data-issue-id="${idLower}"]`,
+      `[data-task-id="${id}"]`,
+      `[data-task-id="${idLower}"]`,
+    ];
+    
+    for (const pattern of dataPatterns) {
+      const byData = this.page.locator(pattern);
+      if (await this.isVisible(byData)) return byData.first();
+    }
 
-    // Strategy 3: Href scan (expensive but reliable)
-    const allLinks = this.page.locator('a[href*="/issue/"]');
-    const linkCount = await allLinks.count();
-    const regex = new RegExp(`/issue/${idLower}(?:/|\\?|$)`);
+    // Strategy 3: Href scan - look for links containing the ID
+    const allLinks = this.page.locator('a[href]');
+    const linkCount = Math.min(await allLinks.count(), 100); // Limit to avoid performance issues
     
     for (let i = 0; i < linkCount; i++) {
       const link = allLinks.nth(i);
       const href = await link.getAttribute('href');
-      if (href && (regex.test(href) || href.includes(id))) {
+      if (href && (href.includes(idLower) || href.includes(id) || href.includes(`#${idLower}`))) {
         if (await this.isVisible(link)) return link;
       }
     }
 
-    // Strategy 4: Search Command
-    console.log(`Issue not found on page, trying global search for: ${id}`);
-    if (await this.openIssueViaSearch(id)) {
+    // Strategy 4: Global search (if app supports it)
+    console.log(`Item not found on page, trying global search for: ${id}`);
+    if (await this.openItemViaSearch(id)) {
       return this.page.locator('body'); // Return valid locator to indicate success
     }
 
     return null;
   }
 
-  private async openIssueViaSearch(query: string): Promise<boolean> {
+  private async openItemViaSearch(query: string): Promise<boolean> {
     try {
       // Reset UI state
       await this.page.keyboard.press('Escape');
@@ -489,26 +512,4 @@ export class ElementFinder {
     ];
   }
 
-  private getNotificationPatterns(): LocatorStrategy[] {
-    return [
-      (p) => p.getByRole('button', { name: /notification/i }),
-      (p) => p.locator('[aria-label*="notification" i]'),
-      (p) => p.locator('[data-testid*="notification" i]'),
-      (p) => p.locator('button[class*="notification"], button[class*="bell"]'),
-      (p) => p.locator('svg[class*="bell"], svg[class*="notification"]').locator('xpath=ancestor::button[1]'),
-      (p) => p.locator('button:has(svg[class*="bell"])'),
-      (p) => p.locator('button:has(svg[class*="notification"])'),
-    ];
-  }
-
-  private getSaveButtonPatterns(): LocatorStrategy[] {
-    return [
-      (p) => p.getByRole('button', { name: /save|update|apply|confirm/i }),
-      (p) => p.locator('button[type="submit"]'),
-      (p) => p.locator('button:has-text("Save")'),
-      (p) => p.locator('button:has-text("Update")'),
-      (p) => p.locator('[aria-label*="save" i]'),
-      (p) => p.locator('[data-testid*="save" i]'),
-    ];
-  }
 }

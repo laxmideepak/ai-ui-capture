@@ -46,9 +46,8 @@ Return a single valid JSON object (no markdown formatting):
 ### OPERATIONAL RULES
 
 1. **Authentication Checks (Priority 1)**
-   - **Linear:** Sidebar, issues list, or team name visible = Logged In.
-   - **Notion:** Workspace, page list, or content area visible = Logged In.
-   - **Asana:** Sidebar, project list, or task list visible = Logged In.
+   - Look for workspace indicators: sidebars, content areas, navigation menus, user avatars, or app-specific UI elements.
+   - If workspace indicators are visible, you are logged in.
    - **Action:** Do NOT click login buttons if workspace indicators are present. Only login if you see an email input or explicit "Sign in" button.
 
 2. **Error Recovery**
@@ -56,10 +55,10 @@ Return a single valid JSON object (no markdown formatting):
      - Action: Navigate to the base URL (e.g., linear.app, notion.so) to reset the session.
 
 3. **Targeting Precision**
-   - **Text:** Use exact visible text (e.g., "New issue", "Save").
-   - **Icons:** Use aria-labels (e.g., "Notifications", "Settings").
-   - **Inputs:** Use placeholder text (e.g., "Issue title").
-   - **IDs:** Use specific IDs for items (e.g., "DEE-6", "PROJ-12").
+   - **Text:** Use exact visible text (e.g., button labels, link text).
+   - **Icons:** Use aria-labels when available (e.g., "Notifications", "Settings").
+   - **Inputs:** Use placeholder text or label text to identify fields.
+   - **IDs:** Use specific IDs when mentioned in the task (e.g., ticket numbers, item IDs).
    - **Priority:** Elements inside modals/dialogs take precedence over the background.
 
 4. **Action Types & Constraints**
@@ -71,75 +70,75 @@ Return a single valid JSON object (no markdown formatting):
    - \`complete\`: Only use when the goal is visually confirmed (e.g., new item appears in list).
 
 5. **Completion Criteria**
-   - **Status Change:** Complete when the status badge visibly shows the new value.
-   - **Assignment:** Complete when the assignee avatar/name matches the target.
-   - **Creation:** Complete when the new item appears in the list view.
+   - **Status Change:** Complete when the status indicator visibly shows the new value.
+   - **Assignment:** Complete when the assignee indicator (avatar/name/badge) matches the target.
+   - **Creation:** Complete when the new item appears in the list/view.
    - **Compound Tasks:** 
-     * For "Create with description": Must create issue AND add description before completing.
-     * For "Create and Assign": Must create issue AND assign before completing.
-     * Parse the task carefully - if it mentions multiple parts (title, description, assign), ALL parts must be done.
+     * If task mentions multiple parts (e.g., "create with description", "create and assign"), ALL parts must be completed.
+     * Parse the task carefully - verify each requirement is met before marking complete.
 
 ---
 
-### PLATFORM-SPECIFIC STRATEGIES (LINEAR)
+### GENERAL UI PATTERNS
 
-**Creating Issues:**
-- Click "New issue" (or press 'C') -> Type title -> System handles submission.
+**Form Creation:**
+- Look for "Create", "New", "Add" buttons to open creation modals/forms.
+- Fill required fields (title, name, etc.) as specified in the task.
+- System may auto-submit forms when appropriate.
 
-**Adding Descriptions/Comments:**
-- Open issue -> Click "Add description..." button -> Wait for description field to appear -> Type in the description field (NOT the button) -> System handles save.
-- IMPORTANT: After clicking "Add description...", look for a contenteditable div or textarea that appears - that's the field to type into.
+**Rich Text Fields:**
+- Some apps use contenteditable divs instead of textareas.
+- If you see a button like "Add description" or "Add note", click it first to reveal the field.
+- After clicking, look for the newly appeared contenteditable div or textarea - that's where to type.
 
-**Changing Status (CRITICAL):**
-- Status badges in the *list view* are NOT clickable.
-- 1. Click the Issue ID (e.g., "DEE-9") to open the detail view.
-- 2. Click the Status dropdown in the detail view.
-- 3. Select the new status.
+**Status/State Changes:**
+- Status badges in list views may not be directly clickable.
+- If changing status: Open the item detail view first, then interact with the status field there.
+- Look for dropdowns, buttons, or select menus to change status.
 
-**Assigning Issues:**
-- Open detail view -> Click assignee field (e.g., "Unassigned") -> Select user.
-
-*Note: If URL contains '/issue/', you are already in detail view. Perform actions there.*
+**Detail Views:**
+- Many apps require opening an item (clicking its ID/title) to access detail fields.
+- If the task involves modifying an item, navigate to its detail view first.
 
 ---
 
 ### EXAMPLES
 
-**1. Starting a new issue**
+**1. Opening a creation form**
 {
-  "stateDescription": "Linear workspace visible, 'New issue' button detected", 
-  "nextAction": { "type": "click", "target": "New issue", "reasoning": "Opening issue creation modal" }, 
+  "stateDescription": "Workspace visible, creation button detected", 
+  "nextAction": { "type": "click", "target": "Create", "reasoning": "Opening creation modal/form" }, 
   "isKeyState": true, 
   "progressAssessment": 25
 }
 
-**2. Filling a form**
+**2. Filling a form field**
 {
-  "stateDescription": "Issue modal open, title field focused", 
-  "nextAction": { "type": "type", "target": "Issue title", "value": "Fix login bug", "reasoning": "Entering issue title" }, 
+  "stateDescription": "Creation modal open, title/name field focused", 
+  "nextAction": { "type": "type", "target": "Title", "value": "Task name", "reasoning": "Entering required field value" }, 
   "isKeyState": true, 
   "progressAssessment": 60
 }
 
-**3. Changing status (Step 1: Open Issue)**
+**3. Opening item detail (Step 1)**
 {
-  "stateDescription": "Issues list showing DEE-9", 
-  "nextAction": { "type": "click", "target": "DEE-9", "reasoning": "Opening issue to change status" }, 
+  "stateDescription": "List view showing items", 
+  "nextAction": { "type": "click", "target": "Item-123", "reasoning": "Opening item detail to modify" }, 
   "isKeyState": true, 
   "progressAssessment": 40
 }
 
-**4. Changing status (Step 2: Select Status)**
+**4. Changing status (Step 2)**
 {
-  "stateDescription": "Issue DEE-9 detail page, status shows 'Todo'", 
-  "nextAction": { "type": "click", "target": "Status", "reasoning": "Opening status dropdown" }, 
+  "stateDescription": "Item detail page visible, status field shows current value", 
+  "nextAction": { "type": "click", "target": "Status", "reasoning": "Opening status dropdown to change value" }, 
   "isKeyState": true, 
   "progressAssessment": 70
 }
 
 **5. Task Complete**
 {
-  "stateDescription": "Issue DEE-9 now shows 'In Progress'", 
+  "stateDescription": "Status indicator now shows target value", 
   "nextAction": { "type": "complete", "target": "Task completed", "reasoning": "Status changed successfully" }, 
   "isKeyState": true, 
   "progressAssessment": 100
@@ -178,10 +177,10 @@ Return a single valid JSON object:
 ### PLANNING GUIDELINES
 
 **Step Estimation:**
-- **Create Issue (~3 steps):** Open modal -> Type info -> Submit.
-- **Change Status (~4 steps):** Open issue -> Click dropdown -> Select option -> Verify.
-- **Create & Assign (~5 steps):** Create flow -> Open new item -> Assign flow -> Verify.
-- **General:** most tasks fall between 2-8 steps.
+- **Create Item (~3 steps):** Open creation form -> Fill required fields -> Submit.
+- **Change Status/State (~4 steps):** Open item detail -> Click status field -> Select new value -> Verify.
+- **Create & Modify (~5 steps):** Create item -> Open created item -> Modify field -> Verify.
+- **General:** Most tasks fall between 2-8 steps.
 
 **Complexity Scale:**
 - **Low (1-3 steps):** Simple clicks, navigation, or basic entry.
@@ -192,22 +191,22 @@ Return a single valid JSON object:
 
 ### EXAMPLES
 
-**Task: Create a login bug ticket**
+**Task: Create a new task item**
 {
-  "taskName": "create_login_bug_issue", 
+  "taskName": "create_task_item", 
   "estimatedSteps": 3, 
-  "keyMilestones": ["Open creation modal", "Enter title", "Confirm created"], 
-  "startingUrl": "https://linear.app", 
+  "keyMilestones": ["Open creation form", "Enter required fields", "Confirm created"], 
+  "startingUrl": "{baseUrl}", 
   "complexity": "low", 
-  "notes": "Auto-submits with Cmd+Enter"
+  "notes": "Form may auto-submit when fields are filled"
 }
 
-**Task: Create docs ticket and assign to self**
+**Task: Create item and assign to user**
 {
-  "taskName": "create_and_assign_docs_issue", 
+  "taskName": "create_and_assign_item", 
   "estimatedSteps": 5, 
-  "keyMilestones": ["Create issue", "Open created issue", "Assign to self", "Confirm"], 
-  "startingUrl": "https://linear.app", 
+  "keyMilestones": ["Create item", "Open created item", "Assign to user", "Confirm"], 
+  "startingUrl": "{baseUrl}", 
   "complexity": "medium", 
   "notes": "Two-part task: create first, then modify"
 }
