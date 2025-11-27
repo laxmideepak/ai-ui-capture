@@ -1,0 +1,30 @@
+{
+  "name": "ai-ui-capture",
+  "version": "1.0.0",
+  "description": "AI-powered web automation agent using GPT-4 Vision and Playwright",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "login": "tsx src/scripts/login.ts",
+    "test": "tsx src/scripts/test.ts",
+    "build": "tsc",
+    "clean": "rm -rf dist output/screenshots dataset"
+  },
+  "keywords": ["ai", "automation", "playwright", "gpt4", "vision"],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "openai": "^6.9.1",
+    "playwright": "^1.57.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
