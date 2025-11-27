@@ -58,9 +58,13 @@ Return a single valid JSON object (no markdown formatting):
 3. **Targeting Precision**
    - **Text:** Use exact visible text (e.g., "New issue", "Save").
    - **Icons:** Use aria-labels (e.g., "Notifications", "Settings").
-   - **Inputs:** Use placeholder text (e.g., "Issue title").
+   - **Inputs:** Use placeholder text (e.g., "Issue title", "Leave a comment...").
    - **IDs:** Use specific IDs for items (e.g., "DEE-6", "PROJ-12").
    - **Priority:** Elements inside modals/dialogs take precedence over the background.
+   - **Exception for description fields:**
+     * Click action: use "Add description..." (the button)
+     * Type action: use "description" or "description field" (NOT "Add description...")
+     * After clicking "Add description...", a contenteditable field appears - target that with "description"
 
 4. **Action Types & Constraints**
    - \`click\`: Buttons, links, dropdowns, menus.
@@ -71,13 +75,14 @@ Return a single valid JSON object (no markdown formatting):
    - \`complete\`: Only use when the goal is visually confirmed (e.g., new item appears in list).
 
 5. **Completion Criteria**
+   - **Parse the full task BEFORE starting**: "Create and assign" = 2 required actions, "Create with description" = 2 required actions
    - **Status Change:** Complete when the status badge visibly shows the new value.
    - **Assignment:** Complete when the assignee avatar/name matches the target.
-   - **Creation:** Complete when the new item appears in the list view.
-   - **Compound Tasks:** 
-     * For "Create with description": Must create issue AND add description before completing.
-     * For "Create and Assign": Must create issue AND assign before completing.
-     * Parse the task carefully - if it mentions multiple parts (title, description, assign), ALL parts must be done.
+   - **Creation only:** Complete when the new item appears in the list view.
+   - **Creation + description:** Must create issue AND add description before completing.
+   - **Creation + assignment:** Must create issue AND assign before completing.
+   - **Don't mark complete until ALL parts of task are done**
+   - If task has "and" or "with" in it, that's usually 2+ separate actions - complete ALL of them
 
 ---
 
@@ -86,9 +91,19 @@ Return a single valid JSON object (no markdown formatting):
 **Creating Issues:**
 - Click "New issue" (or press 'C') -> Type title -> System handles submission.
 
-**Adding Descriptions/Comments:**
-- Open issue -> Click "Add description..." button -> Wait for description field to appear -> Type in the description field (NOT the button) -> System handles save.
-- IMPORTANT: After clicking "Add description...", look for a contenteditable div or textarea that appears - that's the field to type into.
+**Adding Descriptions/Comments (CRITICAL):**
+1. If you see "Add description..." text and task requires adding description:
+   - First action: click -> "Add description..." (this reveals the input field)
+   - DO NOT try to type into "Add description..." - that's a button, not an input
+2. After clicking "Add description...":
+   - A contenteditable input field appears (usually empty or with gray placeholder)
+   - Next action should be: type -> "description" (generic target name)
+   - System will find the actual contenteditable field
+3. Never use "Add description..." as a type target - use "description" or "description field" instead
+
+Example sequence:
+- Step N: click -> "Add description..." (reveals field)
+- Step N+1: type -> "description" (types into the revealed field)
 
 **Changing Status (CRITICAL):**
 - Status badges in the *list view* are NOT clickable.

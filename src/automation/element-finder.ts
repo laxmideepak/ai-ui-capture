@@ -183,79 +183,106 @@ export class ElementFinder {
   }
 
   private async findDescriptionField(): Promise<Locator | null> {
-    const selectors = [
-      'div[contenteditable="true"][placeholder*="description" i]',
-      'div[contenteditable="true"][data-placeholder*="Add a description" i]',
-      'div[contenteditable="true"]:has-text("")', // Empty contenteditable (description field after clicking)
-      'textarea[placeholder*="description" i]',
-    ];
+    console.log('Looking for description field...');
 
-    // 1. Direct search for existing description field (already opened)
-    for (const selector of selectors) {
-      const locator = this.page.locator(selector).first();
-      if (await this.isVisible(locator)) {
-        // Verify it's actually editable, not a button
-        const tag = await locator.evaluate((el) => el.tagName.toLowerCase());
-        const role = await locator.getAttribute('role').catch(() => null);
-        if (tag === 'div' && role !== 'button') {
-          console.log(`Found description field via selector: ${selector}`);
-          return locator;
-        }
-      }
-    }
-
-    // 2. Look for contenteditable divs that might be description fields
-    const contentEditables = await this.page.locator('div[contenteditable="true"]').all();
-    for (const editable of contentEditables) {
-      const placeholder = await editable.getAttribute('placeholder').catch(() => '');
-      const dataPlaceholder = await editable.getAttribute('data-placeholder').catch(() => '');
-      const role = await editable.getAttribute('role').catch(() => null);
-      
-      if (role !== 'button' && (placeholder.toLowerCase().includes('description') || 
-          dataPlaceholder.toLowerCase().includes('description') ||
-          (placeholder === '' && dataPlaceholder === ''))) {
-        const text = await editable.textContent().catch(() => '');
-        // If it's empty or has minimal text, it's likely the description field
-        if (text.trim().length < 50) {
-          console.log('Found description field via contenteditable search');
-          return editable;
-        }
-      }
-    }
-
-    // 3. If no field found, try clicking "Add description" button
-    const addButton = this.page.getByText('Add description', { exact: false }).first();
+    // Step 1: Check if "Add description..." button exists (means field not open yet)
+    const addButton = this.page.getByText(/^Add description/i).first();
+    
     if (await this.isVisible(addButton)) {
-      console.log('Clicking "Add description" button to reveal field');
-      await addButton.click();
-      await this.manager.waitForStable(1000); // Give it time to appear
-      
-      // Retry search after button click
-      for (const selector of selectors) {
-        const locator = this.page.locator(selector).first();
-        if (await this.isVisible(locator)) {
-          const tag = await locator.evaluate((el) => el.tagName.toLowerCase());
-          if (tag === 'div' || tag === 'textarea') {
-            console.log(`Found description field after button click: ${selector}`);
-            return locator;
-          }
-        }
+      console.log('Found "Add description" button - clicking to reveal field');
+      try {
+        await addButton.click({ timeout: 5000 });
+      } catch {
+        await addButton.click({ force: true });
       }
       
-      // Also check contenteditables again after click
-      const newEditables = await this.page.locator('div[contenteditable="true"]').all();
-      for (const editable of newEditables) {
-        const role = await editable.getAttribute('role').catch(() => null);
-        if (role !== 'button') {
-          const text = await editable.textContent().catch(() => '');
-          if (text.trim().length < 50) {
-            console.log('Found description field after button click via contenteditable');
-            return editable;
-          }
-        }
-      }
+      // CRITICAL: Wait for animation and DOM update
+      await this.page.waitForTimeout(1500);
     }
 
+    // Step 2: After clicking (or if already open), find the actual contenteditable div
+    // Linear's description field characteristics:
+    // - It's a div with contenteditable="true"
+    // - It's NOT the title field
+    // - It's NOT the comment field  
+    // - It's usually the LAST contenteditable on the page (most recently added)
+    
+    const allContentEditables = await this.page.locator('div[contenteditable="true"]').all();
+    console.log(`Found ${allContentEditables.length} contenteditable divs total`);
+
+    // Check from last to first (most recently added elements)
+    for (let i = allContentEditables.length - 1; i >= 0; i--) {
+      const el = allContentEditables[i];
+      if (!(await this.isVisible(el))) continue;
+
+      // Get element characteristics
+      const info = await el.evaluate((node) => {
+        const placeholder = node.getAttribute('placeholder') || node.getAttribute('data-placeholder') || '';
+        const ariaLabel = node.getAttribute('aria-label') || '';
+        const role = node.getAttribute('role');
+        const text = (node.textContent || '').trim();
+        
+        // Get parent context to understand what this field is
+        let parentText = '';
+        let parent = node.parentElement;
+        while (parent && parentText.length < 100) {
+          parentText += (parent.textContent || '').trim().substring(0, 200);
+          parent = parent.parentElement;
+          if (parent?.tagName === 'BODY') break;
+        }
+
+        return {
+          placeholder: placeholder.toLowerCase(),
+          ariaLabel: ariaLabel.toLowerCase(),
+          role,
+          text,
+          textLength: text.length,
+          parentText: parentText.toLowerCase(),
+        };
+      });
+
+      console.log(`Checking contenteditable ${i}:`, {
+        placeholder: info.placeholder || '(none)',
+        ariaLabel: info.ariaLabel || '(none)',
+        textLength: info.textLength,
+      });
+
+      // SKIP title fields
+      if (info.placeholder.includes('title')) {
+        console.log('  → Skipping: is title field');
+        continue;
+      }
+      if (info.placeholder.includes('issue')) {
+        console.log('  → Skipping: is issue title field');
+        continue;
+      }
+
+      // SKIP comment fields
+      if (info.placeholder.includes('comment')) {
+        console.log('  → Skipping: is comment field');
+        continue;
+      }
+      if (info.placeholder.includes('leave')) {
+        console.log('  → Skipping: is comment field (leave)');
+        continue;
+      }
+      if (info.role === 'textbox' && info.parentText.includes('comment')) {
+        console.log('  → Skipping: is comment field (context)');
+        continue;
+      }
+
+      // SKIP if it has substantial text already (probably not the description field we just opened)
+      if (info.textLength > 100) {
+        console.log('  → Skipping: has too much text already');
+        continue;
+      }
+
+      // This is likely the description field!
+      console.log('  ✓ Using this as description field');
+      return el;
+    }
+
+    console.warn('Could not find description field after all checks');
     return null;
   }
 
