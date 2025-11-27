@@ -7,6 +7,7 @@ import { config } from '../utils/config';
 import { generateDataset } from '../output/generate-dataset';
 import { SetOfMarksGenerator } from '../perception/som-generator';
 import { StateObserver } from '../perception/state-observer';
+import { AccessibilityTreeExtractor } from '../perception/accessibility-tree';
 import { UniversalElementResolver } from '../execution/universal-element-resolver';
 
 export interface ActionEntry {
@@ -82,24 +83,52 @@ export class NavigationAgent {
           continue;
         }
 
-        // B. PERCEPTION - Generate Set-of-Marks
-        const { elements, annotatedScreenshot } = await somGenerator.generate();
+        // B. PERCEPTION - Generate Set-of-Marks (with fallback)
+        let somElements: any[] = [];
+        let screenshotPath: string;
+        
+        try {
+          const somResult = await somGenerator.generate();
+          if (somResult.elements.length > 0 && somResult.annotatedScreenshot) {
+            somElements = somResult.elements;
+            screenshotPath = somResult.annotatedScreenshot;
+            console.log(`SoM generated: ${somElements.length} elements`);
+          } else {
+            // Fallback to regular screenshot
+            screenshotPath = path.join(screenshotDir, `step_${String(step).padStart(3, '0')}.png`);
+            await this.pw.screenshot(screenshotPath);
+            console.log('SoM failed, using regular screenshot');
+          }
+        } catch (somError) {
+          console.warn('SoM generation error, using fallback:', somError);
+          screenshotPath = path.join(screenshotDir, `step_${String(step).padStart(3, '0')}.png`);
+          await this.pw.screenshot(screenshotPath);
+        }
         
         // C. CONTEXT - Extract accessibility tree (structured)
-        const accessibilityTree = await this.extractAccessibilityTree();
+        const treeExtractor = new AccessibilityTreeExtractor(this.pw.getPage());
+        const accessibilityTree = await treeExtractor.extract();
         const currentUrl = this.pw.getCurrentUrl();
 
-        // D. Build Prompt (SoM-aware)
+        // D. Build Prompt (SoM-aware if we have elements, otherwise use regular prompt)
         const recoveryContext = this.buildRecoveryContext(history);
-        const prompt = VISION_DECISION_PROMPT_SOM
-          .replace('{objective}', task)
-          .replace('{currentUrl}', currentUrl)
-          .replace('{accessibilityTree}', JSON.stringify(accessibilityTree, null, 2))
-          .replace('{actionHistory}', JSON.stringify(this.compactHistory(history.slice(-3))))
-          .replace('{recoveryContext}', recoveryContext);
+        const useSoMPrompt = somElements.length > 0;
+        const prompt = useSoMPrompt
+          ? VISION_DECISION_PROMPT_SOM
+              .replace('{objective}', task)
+              .replace('{currentUrl}', currentUrl)
+              .replace('{accessibilityTree}', JSON.stringify(accessibilityTree, null, 2))
+              .replace('{actionHistory}', JSON.stringify(this.compactHistory(history.slice(-3))))
+              .replace('{recoveryContext}', recoveryContext)
+          : VISION_DECISION_PROMPT
+              .replace('{objective}', task)
+              .replace('{actionHistory}', JSON.stringify(this.compactHistory(history.slice(-3))))
+              .replace('{domContext}', JSON.stringify(accessibilityTree, null, 2).substring(0, 3000))
+              .replace('{currentUrl}', currentUrl)
+              .replace('{recoveryContext}', recoveryContext);
 
-        // E. REASONING - GPT-4V decides next action with SoM IDs
-        const decision = await this.gpt.analyzeScreenshot(annotatedScreenshot, prompt);
+        // E. REASONING - GPT-4V decides next action
+        const decision = await this.gpt.analyzeScreenshot(screenshotPath, prompt);
         
         // F. Refine Decision (Business Logic Heuristics)
         this.refineDecision(decision, history, task);
@@ -113,30 +142,71 @@ export class NavigationAgent {
           complete = true;
           console.log('Task marked as complete by agent.');
         } else {
-          const resolver = new UniversalElementResolver(this.pw.getPage(), elements);
-          
-          if ((decision.nextAction as any).somId && (decision.nextAction as any).somId > 0) {
-            const element = await resolver.resolveByID((decision.nextAction as any).somId);
-            if (element) {
-              await this.executeActionOnElement(decision.nextAction, element, resolver);
-            } else {
-              console.error(`Failed to resolve SoM ID: ${(decision.nextAction as any).somId}`);
-              // Fallback to description-based resolution
-              const fallback = await resolver.resolveByDescription(decision.nextAction.reasoning);
-              if (fallback) {
-                await this.executeActionOnElement(decision.nextAction, fallback, resolver);
+          try {
+            if (useSoMPrompt && somElements.length > 0) {
+              // Use SoM-based resolution
+              const resolver = new UniversalElementResolver(this.pw.getPage(), somElements);
+              
+              if ((decision.nextAction as any).somId && (decision.nextAction as any).somId > 0) {
+                const element = await resolver.resolveByID((decision.nextAction as any).somId);
+                if (element) {
+                  await this.executeActionOnElement(decision.nextAction, element, resolver);
+                } else {
+                  console.error(`Failed to resolve SoM ID: ${(decision.nextAction as any).somId}`);
+                  // Fallback to description-based resolution
+                  const fallback = await resolver.resolveByDescription(decision.nextAction.reasoning || decision.nextAction.target);
+                  if (fallback) {
+                    await this.executeActionOnElement(decision.nextAction, fallback, resolver);
+                  } else {
+                    console.warn('SoM resolution failed, waiting and continuing...');
+                    await this.pw.getPage().waitForTimeout(1000);
+                  }
+                }
+              } else {
+                // No valid somId - try description-based resolution
+                const element = await resolver.resolveByDescription(decision.nextAction.reasoning || decision.nextAction.target);
+                if (element) {
+                  await this.executeActionOnElement(decision.nextAction, element, resolver);
+                } else {
+                  console.warn('SoM description resolution failed, waiting and continuing...');
+                  await this.pw.getPage().waitForTimeout(1000);
+                }
               }
-            }
-          } else {
-            // No valid somId - try description-based resolution
-            const element = await resolver.resolveByDescription(decision.nextAction.reasoning || decision.nextAction.target);
-            if (element) {
-              await this.executeActionOnElement(decision.nextAction, element, resolver);
             } else {
-              console.error(`Failed to resolve element for action: ${decision.nextAction.type} -> ${decision.nextAction.target}`);
-              // Wait and continue - let the next iteration try again
-              await this.pw.getPage().waitForTimeout(1000);
+              // Fallback: Use coordinate-based click if we have target
+              console.log('Using fallback execution (no SoM elements available)');
+              const page = this.pw.getPage();
+              
+              if (decision.nextAction.type === 'click') {
+                // Try to find element by text/role
+                const locator = page.getByRole('button', { name: new RegExp(decision.nextAction.target, 'i') })
+                  .or(page.getByText(new RegExp(decision.nextAction.target, 'i')))
+                  .first();
+                if (await locator.isVisible().catch(() => false)) {
+                  await locator.click();
+                } else {
+                  console.warn(`Could not find element: ${decision.nextAction.target}`);
+                }
+              } else if (decision.nextAction.type === 'type') {
+                const locator = page.getByPlaceholder(new RegExp(decision.nextAction.target, 'i'))
+                  .or(page.getByRole('textbox', { name: new RegExp(decision.nextAction.target, 'i') }))
+                  .first();
+                if (await locator.isVisible().catch(() => false)) {
+                  await locator.fill(decision.nextAction.value || '');
+                } else {
+                  console.warn(`Could not find input: ${decision.nextAction.target}`);
+                }
+              } else if (decision.nextAction.type === 'navigate') {
+                await this.pw.navigate(decision.nextAction.target || decision.nextAction.value || '');
+              } else if (decision.nextAction.type === 'wait') {
+                await page.waitForTimeout(3000);
+              }
+              
+              await this.pw.waitForStable();
             }
+          } catch (execError) {
+            console.error(`Action execution failed: ${execError instanceof Error ? execError.message : String(execError)}`);
+            // Continue to next step instead of crashing
           }
           
           // Post-action check: Auto-complete if we detect success patterns
@@ -456,30 +526,6 @@ export class NavigationAgent {
     return (sameAction && stagnant) || errors;
   }
 
-  private async extractAccessibilityTree(): Promise<any> {
-    return await this.pw.getPage().evaluate(() => {
-      // @ts-ignore - document is available in browser context
-      const tree: any = { children: [] };
-      
-      function buildTree(node: any, parent: any) {
-        const role = node.getAttribute('role') || node.tagName.toLowerCase();
-        const name = node.getAttribute('aria-label') || 
-                     (node.textContent?.trim().substring(0, 30) || '') || 
-                     (node.placeholder || '');
-        
-        if (role && name) {
-          const item = { role, name, children: [] };
-          parent.children.push(item);
-          
-          Array.from(node.children).forEach((child: any) => buildTree(child, item));
-        }
-      }
-      
-      // @ts-ignore - document is available in browser context
-      buildTree(document.body, tree);
-      return tree;
-    });
-  }
 
   private async captureStateWithSoM(step: number, taskName: string, somGenerator: SetOfMarksGenerator): Promise<void> {
     const { annotatedScreenshot } = await somGenerator.generate();

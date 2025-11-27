@@ -1,94 +1,83 @@
 import { Page } from 'playwright';
 
-interface StateChange {
-  type: 'mutation' | 'visual';
+export interface StateChange {
+  type: string;
   timestamp: number;
   description: string;
   requiresScreenshot: boolean;
 }
 
 export class StateObserver {
-  private mutationObserver: MutationObserver | null = null;
   private lastScreenshotHash: string = '';
   private changeBuffer: StateChange[] = [];
-  private pollingInterval: NodeJS.Timeout | null = null;
+  private pollInterval: NodeJS.Timeout | null = null;
 
   constructor(private page: Page) {}
 
-  /**
-   * Setup DOM mutation observer + visual diff checker
-   * Triggers screenshot capture on meaningful changes
-   */
-  async startObserving(onStateChange: (change: StateChange) => Promise<void>): Promise<void> {
-    // 1. Setup MutationObserver in browser context
-    await this.page.evaluate(() => {
-      (window as any).__stateChanges = [];
-      
-      const observer = new MutationObserver((mutations) => {
-        let significantChange = false;
-        
-        for (const mutation of mutations) {
-          // Detect meaningful changes: modals, dialogs, form fields
+  async startObserving(
+    onStateChange: (change: StateChange) => Promise<void>
+  ): Promise<void> {
+    // Setup MutationObserver in browser - PURE VANILLA JAVASCRIPT
+    await this.page.evaluate(function setupObserver() {
+      var win = window as any;
+      win.__stateChanges = [];
+
+      var observer = new MutationObserver(function handleMutations(mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var mutation = mutations[i];
+
           if (mutation.type === 'childList') {
-            mutation.addedNodes.forEach((node) => {
-              if (node.nodeType === 1) { // Element node
-                const el = node as Element;
-                
-                // Modal/Dialog appeared
-                if (el.getAttribute('role') === 'dialog' || 
-                    el.getAttribute('role') === 'alertdialog' ||
-                    el.tagName === 'DIALOG') {
-                  significantChange = true;
-                  (window as any).__stateChanges.push({
+            for (var j = 0; j < mutation.addedNodes.length; j++) {
+              var node = mutation.addedNodes[j];
+
+              if (node.nodeType === 1) {
+                var el = node;
+                var role = el.getAttribute('role');
+
+                // Modal/Dialog opened
+                if (
+                  role === 'dialog' ||
+                  role === 'alertdialog' ||
+                  el.tagName === 'DIALOG'
+                ) {
+                  win.__stateChanges.push({
                     type: 'mutation',
-                    description: 'Modal/Dialog opened',
-                    timestamp: Date.now(),
-                  });
-                }
-                
-                // Dropdown/Menu appeared
-                if (el.getAttribute('role') === 'menu' ||
-                    el.getAttribute('role') === 'listbox' ||
-                    el.classList.contains('dropdown') ||
-                    el.classList.contains('menu')) {
-                  significantChange = true;
-                  (window as any).__stateChanges.push({
-                    type: 'mutation',
-                    description: 'Dropdown/Menu opened',
+                    description: 'Modal opened',
                     timestamp: Date.now(),
                   });
                 }
 
-                // Toast/Notification appeared
-                if (el.getAttribute('role') === 'alert' ||
-                    el.getAttribute('role') === 'status' ||
-                    el.classList.contains('toast') ||
-                    el.classList.contains('notification')) {
-                  significantChange = true;
-                  (window as any).__stateChanges.push({
-                    type: 'mutation',
-                    description: 'Toast/Notification shown',
-                    timestamp: Date.now(),
-                  });
+                // Dropdown/Menu opened
+                var className = el.className;
+                if (typeof className === 'string') {
+                  if (
+                    role === 'menu' ||
+                    role === 'listbox' ||
+                    className.indexOf('dropdown') > -1 ||
+                    className.indexOf('menu') > -1
+                  ) {
+                    win.__stateChanges.push({
+                      type: 'mutation',
+                      description: 'Dropdown opened',
+                      timestamp: Date.now(),
+                    });
+                  }
+
+                  // Toast/Notification
+                  if (
+                    role === 'alert' ||
+                    role === 'status' ||
+                    className.indexOf('toast') > -1 ||
+                    className.indexOf('notification') > -1
+                  ) {
+                    win.__stateChanges.push({
+                      type: 'mutation',
+                      description: 'Toast shown',
+                      timestamp: Date.now(),
+                    });
+                  }
                 }
               }
-            });
-          }
-          
-          // Form field value changes (for tracking progress)
-          if (mutation.type === 'attributes' && 
-              (mutation.attributeName === 'value' || 
-               mutation.attributeName === 'aria-checked' ||
-               mutation.attributeName === 'aria-selected')) {
-            const target = mutation.target as Element;
-            if (target.tagName === 'INPUT' || 
-                target.tagName === 'TEXTAREA' ||
-                target.getAttribute('contenteditable') === 'true') {
-              (window as any).__stateChanges.push({
-                type: 'mutation',
-                description: 'Form field updated',
-                timestamp: Date.now(),
-              });
             }
           }
         }
@@ -97,80 +86,72 @@ export class StateObserver {
       observer.observe(document.body, {
         childList: true,
         subtree: true,
-        attributes: true,
-        attributeFilter: ['value', 'aria-checked', 'aria-selected', 'class', 'role'],
+        attributes: false,
       });
 
-      (window as any).__mutationObserver = observer;
+      win.__mutationObserver = observer;
     });
 
-    // 2. Poll for changes from browser context
+    // Start polling
     this.startPolling(onStateChange);
   }
 
-  private async startPolling(onStateChange: (change: StateChange) => Promise<void>): Promise<void> {
-    this.pollingInterval = setInterval(async () => {
-      const changes = await this.page.evaluate(() => {
-        const changes = (window as any).__stateChanges || [];
-        (window as any).__stateChanges = []; // Clear buffer
-        return changes;
-      });
+  private startPolling(onStateChange: (change: StateChange) => Promise<void>): void {
+    this.pollInterval = setInterval(async () => {
+      try {
+        const changes = await this.page.evaluate(function getStateChanges() {
+          var win = window as any;
+          var changes = win.__stateChanges || [];
+          win.__stateChanges = [];
+          return changes;
+        });
 
-      for (const change of changes) {
-        const stateChange: StateChange = {
-          ...change,
-          requiresScreenshot: this.shouldCaptureScreenshot(change),
-        };
+        for (let i = 0; i < changes.length; i++) {
+          const change = changes[i];
+          const stateChange: StateChange = {
+            type: change.type,
+            timestamp: change.timestamp,
+            description: change.description,
+            requiresScreenshot: this.shouldCaptureScreenshot(change.description),
+          };
 
-        this.changeBuffer.push(stateChange);
+          this.changeBuffer.push(stateChange);
 
-        if (stateChange.requiresScreenshot) {
-          await onStateChange(stateChange);
+          if (stateChange.requiresScreenshot) {
+            await onStateChange(stateChange);
+          }
         }
+      } catch (error) {
+        // Silent fail on polling errors
       }
-    }, 500); // Poll every 500ms
+    }, 500);
   }
 
   async stopObserving(): Promise<void> {
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
+    if (this.pollInterval) {
+      clearInterval(this.pollInterval);
+      this.pollInterval = null;
     }
 
-    await this.page.evaluate(() => {
-      const observer = (window as any).__mutationObserver;
-      if (observer) observer.disconnect();
-    });
+    try {
+      await this.page.evaluate(function cleanupObserver() {
+        var win = window as any;
+        if (win.__mutationObserver) {
+          win.__mutationObserver.disconnect();
+        }
+      });
+    } catch {
+      // Silent fail
+    }
   }
 
-  private shouldCaptureScreenshot(change: StateChange): boolean {
-    // Capture on: modals, dropdowns, toasts, form submissions
-    const captureKeywords = ['modal', 'dialog', 'dropdown', 'menu', 'toast', 'notification'];
-    return captureKeywords.some(kw => change.description.toLowerCase().includes(kw));
-  }
-
-  /**
-   * Visual diffing as fallback (expensive, use sparingly)
-   */
-  async hasVisuallyChanged(): Promise<boolean> {
-    const screenshot = await this.page.screenshot({ encoding: 'base64' });
-    const hash = this.simpleHash(screenshot as string);
-    
-    if (hash !== this.lastScreenshotHash) {
-      this.lastScreenshotHash = hash;
-      return true;
+  private shouldCaptureScreenshot(description: string): boolean {
+    var keywords = ['Modal', 'modal', 'dialog', 'Dialog', 'Dropdown', 'dropdown'];
+    for (var i = 0; i < keywords.length; i++) {
+      if (description.indexOf(keywords[i]) > -1) {
+        return true;
+      }
     }
     return false;
   }
-
-  private simpleHash(str: string): string {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash;
-    }
-    return hash.toString();
-  }
 }
-
